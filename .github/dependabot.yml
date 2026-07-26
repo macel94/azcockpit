@@ -1,6 +1,5 @@
 version: 2
 updates:
-  # Go module dependencies
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
@@ -13,24 +12,13 @@ updates:
       - "go"
     open-pull-requests-limit: 10
     groups:
-      azure-sdk:
+      all-go-deps:
         patterns:
-          - "github.com/Azure/*"
+          - "*"
         update-types:
           - "minor"
           - "patch"
-      charmbracelet:
-        patterns:
-          - "github.com/charmbracelet/*"
-        update-types:
-          - "minor"
-          - "patch"
-    ignore:
-      - dependency-name: "github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
-        # Pin this until we validate the new version manually
-        update-types: ["version-update:semver-major"]
 
-  # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -42,3 +30,10 @@ updates:
       - "dependencies"
       - "ci"
     open-pull-requests-limit: 5
+    groups:
+      all-actions-deps:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
