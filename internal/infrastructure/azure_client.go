@@ -284,6 +284,14 @@ func (c *azureClient) InitializeExample(ctx context.Context, subscriptionID, loc
 		"--subscription", subscriptionID,
 	).Run()
 
+	// Register the Microsoft.KeyVault resource provider if not already
+	// registered. This is idempotent — the subscription's RP registration
+	// state is unaffected by repeated calls.
+	_ = exec.CommandContext(ctx, azPath, "provider", "register",
+		"--namespace", "Microsoft.KeyVault",
+		"--subscription", subscriptionID,
+	).Run()
+
 	// Create the Key Vault.
 	cmd := exec.CommandContext(ctx, azPath, "keyvault", "create",
 		"--name", vaultName,
