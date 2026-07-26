@@ -1,0 +1,47 @@
+# --- Go ---
+# Compiled output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary (build output pattern)
+*.test
+*.test.exe
+
+# Go workspace file (local overrides, not intended to be shared)
+*.local
+go.work
+go.work.sum
+
+# Vendor (if not vendoring intentionally)
+vendor/
+
+# --- IDE / Editors ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Build artifacts ---
+/tmp/
+/out/
+/bin/
+/dist/
+
+# --- Environment / secrets (never commit) ---
+.env
+.env.*
+*.pem
+*.key
+*.cert
+**/azure-*-credentials*.json
+
+# --- OS metadata ---
+.DS_Store
+Thumbs.db
+*.orig
