@@ -52,3 +52,31 @@ var SpinnerStyle = lipgloss.NewStyle().
 var TenantStyle = lipgloss.NewStyle().
 	Foreground(SecondaryColor).
 	Bold(true)
+
+// SelectedStyle is used for the cursor row of the FOCUSED pane
+// (full cyan background). Defined above.
+
+// CursorInactiveStyle marks the cursor row of a pane that does NOT
+// currently have focus — a subtle outline instead of a full highlight,
+// so the user can see where they left off in each pane.
+var CursorInactiveStyle = lipgloss.NewStyle().
+	Foreground(SecondaryColor).
+	Bold(true)
+
+// ActiveTenantStyle marks the tenant whose subscriptions are currently
+// shown — a green check + bold so the active context is unmistakable.
+var ActiveTenantStyle = lipgloss.NewStyle().
+	Foreground(SuccessColor).
+	Bold(true)
+
+// PaneTitleFocusedStyle marks the header of the pane that has keyboard focus.
+var PaneTitleFocusedStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#FFFFFF")).
+	Background(PrimaryColor).
+	Bold(true).
+	Padding(0, 1)
+
+// PaneTitleBlurredStyle marks the header of an unfocused pane.
+var PaneTitleBlurredStyle = lipgloss.NewStyle().
+	Foreground(MutedColor).
+	Bold(true)

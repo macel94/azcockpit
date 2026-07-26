@@ -30,6 +30,14 @@ const (
 	viewSecrets
 )
 
+// focusPane represents which pane has keyboard focus on the subscriptions screen.
+type focusPane int
+
+const (
+	focusTenants focusPane = iota
+	focusSubscriptions
+)
+
 // --- Messages ---
 
 // fetchResultMsg carries the result of an async Azure fetch back to the UI.
@@ -76,7 +84,10 @@ type Model struct {
 	subscriptions []domain.Subscription
 
 	// Navigation
-	cursor               int
+	cursor               int // cursor for the subscriptions list
+	tenantCursor         int // cursor for the tenants list
+	paneFocus            focusPane
+	activeTenantID       string // tenant selected as active context (visual)
 	selectedSubscription *domain.Subscription
 	selectedVault        *domain.KeyVault
 	vaults               []domain.KeyVault
