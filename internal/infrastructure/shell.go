@@ -39,6 +39,30 @@ func SetAzAccount(sub domain.Subscription) error {
 	return nil
 }
 
+// SetAzAccountWithTenant switches the active Azure CLI subscription and
+// tenant by running `az account set --subscription <sub.ID> --tenant <sub.TenantID>`.
+// If sub.TenantID is empty, the --tenant flag is omitted for backward
+// compatibility.
+func SetAzAccountWithTenant(sub domain.Subscription) error {
+	azPath, err := exec.LookPath("az")
+	if err != nil {
+		return fmt.Errorf("azure CLI (az) not found in PATH: %w", err)
+	}
+
+	args := []string{"account", "set", "--subscription", sub.ID}
+	if sub.TenantID != "" {
+		args = append(args, "--tenant", sub.TenantID)
+	}
+
+	cmd := exec.Command(azPath, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to set az account: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	return nil
+}
+
 // WriteEnvFile appends KEY=VALUE entries to the given .env file path.
 // Entries whose keys already exist in the file are skipped.
 // Creates the file (and parent directories) if they don't exist.

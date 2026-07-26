@@ -199,3 +199,81 @@ func TestStringValue(t *testing.T) {
 func strPtr(s string) *string {
 	return &s
 }
+
+func TestSecretNameFromID(t *testing.T) {
+	tests := []struct {
+		name     string
+		id       string
+		expected string
+	}{
+		{
+			name:     "valid secret ID with version",
+			id:       "https://myvault.vault.azure.net/secrets/my-secret/abc123def456",
+			expected: "my-secret",
+		},
+		{
+			name:     "valid secret ID without version",
+			id:       "https://myvault.vault.azure.net/secrets/my-secret",
+			expected: "my-secret",
+		},
+		{
+			name:     "secret name with hyphens and numbers",
+			id:       "https://kv-prod-us.vault.azure.net/secrets/db-password-v3/version1",
+			expected: "db-password-v3",
+		},
+		{
+			name:     "secret name with dots",
+			id:       "https://kv.vault.azure.net/secrets/app.config/version",
+			expected: "app.config",
+		},
+		{
+			name:     "empty string",
+			id:       "",
+			expected: "",
+		},
+		{
+			name:     "no /secrets/ segment",
+			id:       "https://myvault.vault.azure.net",
+			expected: "",
+		},
+		{
+			name:     "trailing slash after secrets",
+			id:       "https://myvault.vault.azure.net/secrets/",
+			expected: "",
+		},
+		{
+			name:     "secrets not in path pattern",
+			id:       "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/vault",
+			expected: "",
+		},
+		{
+			name:     "partial match of /secrets/ substring",
+			id:       "https://myvault.vault.azure.net/notsecrets/my-secret",
+			expected: "",
+		},
+		{
+			name:     "actually /secrets in wrong context",
+			id:       "https://myvault.vault.azure.net/not-secrets/my-secret",
+			expected: "",
+		},
+		{
+			name:     "shortest valid ID",
+			id:       "/secrets/x",
+			expected: "x",
+		},
+		{
+			name:     "ID with query params after version is not supported",
+			id:       "https://myvault.vault.azure.net/secrets/my-secret/version?api-version=7.4",
+			expected: "my-secret",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := secretNameFromID(tt.id)
+			if got != tt.expected {
+				t.Errorf("secretNameFromID(%q) = %q, want %q", tt.id, got, tt.expected)
+			}
+		})
+	}
+}

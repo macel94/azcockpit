@@ -66,6 +66,13 @@ type errMsg struct {
 	err error
 }
 
+// exampleCreatedMsg carries the result of an InitializeExample call back to the UI.
+type exampleCreatedMsg struct {
+	vault   domain.KeyVault
+	secrets []domain.KeyVaultSecret
+	err     error
+}
+
 // --- Model ---
 
 // Model is the top-level Bubble Tea model for AzCockpit.
@@ -93,12 +100,15 @@ type Model struct {
 	vaults               []domain.KeyVault
 	secrets              []domain.KeyVaultSecret
 	viewState            viewState
+	filterQuery          string // subscription display-name filter (empty = no filter)
 
 	// State
-	loading  bool
-	err      error
-	ready    bool
-	quitting bool
+	loading        bool
+	err            error
+	ready          bool
+	quitting       bool
+	filterActive   bool // whether the subscription filter input mode is active
+	exampleLoading bool // whether an example Key Vault is being created
 
 	// Dimensions
 	width  int
@@ -135,7 +145,7 @@ func (m Model) Init() tea.Cmd {
 // managed by Bubble Tea, so the UI thread stays responsive.
 func (m Model) fetchData() tea.Msg {
 	// 1. Try the cache first.
-	if m.cache.IsValid() {
+	if m.cache != nil && m.cache.IsValid() {
 		return fetchResultMsg{
 			tenants:       m.cache.GetTenants(),
 			subscriptions: m.cache.GetSubscriptions(),
@@ -208,7 +218,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if m.loading || m.viewState == viewVaultsLoading || m.viewState == viewSecretsLoading {
+		if m.loading || m.viewState == viewVaultsLoading || m.viewState == viewSecretsLoading || m.exampleLoading {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -251,6 +261,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.err = msg.err
 		return m, nil
+
+	case exampleCreatedMsg:
+		m.exampleLoading = false
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.vaults = append(m.vaults, msg.vault)
+		m.selectedVault = &msg.vault
+		m.secrets = msg.secrets
+		m.cursor = 0
+		m.viewState = viewSecrets
+		return m, nil
 	}
 
 	// Keep the spinner ticking while loading.
@@ -265,6 +288,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKeyMsg processes keyboard input based on the current viewState.
 func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// If filter mode is active on the subscriptions view, handle filter input.
+	if m.filterActive && m.viewState == viewSubscriptions {
+		return m.handleFilterKey(msg)
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "q":
 		m.quitting = true
@@ -281,6 +309,56 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "enter":
 		return m.handleEnter()
+
+	case "/":
+		// Activate filter mode on subscriptions view.
+		if m.viewState == viewSubscriptions && m.ready {
+			m.filterActive = true
+			m.filterQuery = ""
+			m.cursor = 0
+			return m, nil
+		}
+	}
+
+	return m, nil
+}
+
+// handleFilterKey handles key input when the subscription filter is active.
+func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.filterActive = false
+		m.filterQuery = ""
+		m.cursor = 0
+		return m, nil
+
+	case "enter":
+		m.filterActive = false
+		return m, nil
+
+	case "backspace":
+		if len(m.filterQuery) > 0 {
+			m.filterQuery = m.filterQuery[:len(m.filterQuery)-1]
+		}
+		m.cursor = 0
+		return m, nil
+
+	case "up", "k":
+		return m.handleUp()
+
+	case "down", "j":
+		return m.handleDown()
+
+	default:
+		// Append alphanumeric characters and space to the filter query.
+		if len(msg.Runes) == 1 {
+			r := msg.Runes[0]
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+				(r >= '0' && r <= '9') || r == ' ' || r == '-' || r == '_' || r == '.' {
+				m.filterQuery += string(r)
+				m.cursor = 0
+			}
+		}
 	}
 
 	return m, nil
@@ -349,11 +427,14 @@ func (m Model) handleUp() (tea.Model, tea.Cmd) {
 func (m Model) handleDown() (tea.Model, tea.Cmd) {
 	switch m.viewState {
 	case viewSubscriptions:
-		if len(m.subscriptions) > 0 && m.cursor < len(m.subscriptions)-1 {
+		filtered := m.filteredSubscriptions()
+		if len(filtered) > 0 && m.cursor < len(filtered)-1 {
 			m.cursor++
 		}
 	case viewVaults:
-		if len(m.vaults) > 0 && m.cursor < len(m.vaults)-1 {
+		// +1 for the [+] Initialize Example button.
+		maxIdx := len(m.vaults) // last valid index is len(vaults) for the button
+		if m.cursor < maxIdx {
 			m.cursor++
 		}
 	case viewSecrets:
@@ -367,14 +448,26 @@ func (m Model) handleDown() (tea.Model, tea.Cmd) {
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	switch m.viewState {
 	case viewSubscriptions:
-		if len(m.subscriptions) > 0 && m.cursor < len(m.subscriptions) {
-			sub := m.subscriptions[m.cursor]
+		filtered := m.filteredSubscriptions()
+		if len(filtered) > 0 && m.cursor < len(filtered) {
+			sub := filtered[m.cursor]
 			m.selectedSubscription = &sub
 			m.viewState = viewVaultsLoading
-			return m, m.fetchVaults(sub.ID)
+			return m, tea.Batch(
+				m.setActiveSubscription(sub.ID, sub.TenantID),
+				m.fetchVaults(sub.ID),
+			)
 		}
 
 	case viewVaults:
+		// Check if cursor is on the [+] Initialize Example button.
+		if m.cursor == len(m.vaults) {
+			if m.selectedSubscription == nil {
+				return m, nil
+			}
+			m.exampleLoading = true
+			return m, m.fetchInitializeExample(m.selectedSubscription.ID)
+		}
 		if len(m.vaults) > 0 && m.cursor < len(m.vaults) {
 			vault := m.vaults[m.cursor]
 			m.selectedVault = &vault
@@ -424,7 +517,7 @@ func (m Model) renderLoading() string {
 	b.WriteString(" Fetching Azure resources...")
 	b.WriteString("\n\n")
 
-	if m.cache.IsValid() {
+	if m.cache != nil && m.cache.IsValid() {
 		b.WriteString(HelpStyle.Render("  (using cached data)"))
 	} else {
 		b.WriteString(HelpStyle.Render("  (authenticating via DefaultAzureCredential...)"))
@@ -480,15 +573,30 @@ func (m Model) renderSubscriptions() string {
 		b.WriteString("\n")
 	}
 
+	// Filter indicator
+	if m.filterActive || m.filterQuery != "" {
+		indicator := fmt.Sprintf("Filter: %s", m.filterQuery)
+		if m.filterActive {
+			indicator += "_"
+		}
+		b.WriteString(FilterStyle.Render(indicator))
+		b.WriteString("\n")
+	}
+
 	// Subscriptions section
-	b.WriteString(TenantStyle.Render(fmt.Sprintf("Subscriptions (%d)", len(m.subscriptions))))
+	filtered := m.filteredSubscriptions()
+	b.WriteString(TenantStyle.Render(fmt.Sprintf("Subscriptions (%d/%d)", len(filtered), len(m.subscriptions))))
 	b.WriteString("\n")
 
-	if len(m.subscriptions) == 0 {
-		b.WriteString(HelpStyle.Render("  No subscriptions found."))
+	if len(filtered) == 0 {
+		if m.filterQuery != "" {
+			b.WriteString(HelpStyle.Render("  No subscriptions match the filter."))
+		} else {
+			b.WriteString(HelpStyle.Render("  No subscriptions found."))
+		}
 		b.WriteString("\n")
 	} else {
-		for i, s := range m.subscriptions {
+		for i, s := range filtered {
 			style := ActiveStyle
 			if !s.IsActive() {
 				style = DisabledStyle
@@ -497,6 +605,9 @@ func (m Model) renderSubscriptions() string {
 			line := fmt.Sprintf("  %s %s", style.Render("●"), s.DisplayName)
 			line += HelpStyle.Render(fmt.Sprintf("  (%s)", s.ID))
 			line += style.Render(fmt.Sprintf("  [%s]", s.State))
+			if s.TenantID != "" {
+				line += HelpStyle.Render(fmt.Sprintf("  tenant:%s", s.TenantID))
+			}
 
 			if i == m.cursor {
 				line = SelectedStyle.Render(line)
@@ -509,7 +620,11 @@ func (m Model) renderSubscriptions() string {
 
 	// Footer
 	b.WriteString("\n")
-	b.WriteString(HelpStyle.Render("  ↑/↓ navigate • enter browse vaults • esc refresh • q quit"))
+	if m.filterActive {
+		b.WriteString(HelpStyle.Render("  type to filter • enter/esc end filter • ↑/↓ navigate • q quit"))
+	} else {
+		b.WriteString(HelpStyle.Render("  ↑/↓ navigate • / filter • enter browse vaults • esc refresh • q quit"))
+	}
 	b.WriteString("\n")
 
 	// Center content if dimensions are known.
@@ -583,6 +698,22 @@ func (m Model) renderVaults() string {
 			b.WriteString("\n")
 		}
 	}
+
+	// [+] Initialize Example Key Vault button
+	if m.exampleLoading {
+		line := fmt.Sprintf("  %s [+] Initializing Example Key Vault...", m.spinner.View())
+		if m.cursor == len(m.vaults) {
+			line = SelectedStyle.Render(line)
+		}
+		b.WriteString(line)
+	} else {
+		line := ButtonStyle.Render("  [+] Initialize Example Key Vault")
+		if m.cursor == len(m.vaults) {
+			line = SelectedStyle.Render(line)
+		}
+		b.WriteString(line)
+	}
+	b.WriteString("\n")
 
 	// Footer
 	b.WriteString("\n")
@@ -748,6 +879,70 @@ func (m Model) fetchSecrets(vaultURI string) tea.Cmd {
 				vaultURI: vaultURI,
 				secrets:  r.secrets,
 				err:      r.err,
+			}
+		}
+	}
+}
+
+// filteredSubscriptions returns the subscriptions matching the current filter query.
+// If no filter is active, returns all subscriptions.
+func (m Model) filteredSubscriptions() []domain.Subscription {
+	if m.filterQuery == "" {
+		return m.subscriptions
+	}
+	q := strings.ToLower(m.filterQuery)
+	var filtered []domain.Subscription
+	for _, s := range m.subscriptions {
+		if strings.Contains(strings.ToLower(s.DisplayName), q) {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
+}
+
+// setActiveSubscription returns a tea.Cmd that asynchronously switches
+// the active Azure CLI subscription for cross-tenant usage.
+func (m Model) setActiveSubscription(subscriptionID, tenantID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), loadingTimeout)
+		defer cancel()
+		// Fire and forget — errors are logged but do not block the flow.
+		_ = m.azureClient.SetActiveSubscription(ctx, subscriptionID, tenantID)
+		// Return nil so Bubble Tea doesn't process a message for this.
+		return nil
+	}
+}
+
+// fetchInitializeExample returns a tea.Cmd that asynchronously creates
+// an example Key Vault with sample secrets.
+func (m Model) fetchInitializeExample(subscriptionID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), loadingTimeout)
+		defer cancel()
+
+		type result struct {
+			vault   domain.KeyVault
+			secrets []domain.KeyVaultSecret
+			err     error
+		}
+
+		ch := make(chan result, 1)
+
+		go func() {
+			vault, secrets, err := m.azureClient.InitializeExample(ctx, subscriptionID, "westus2")
+			ch <- result{vault: vault, secrets: secrets, err: err}
+		}()
+
+		select {
+		case <-ctx.Done():
+			return exampleCreatedMsg{
+				err: fmt.Errorf("request timed out after %v", loadingTimeout),
+			}
+		case r := <-ch:
+			return exampleCreatedMsg{
+				vault:   r.vault,
+				secrets: r.secrets,
+				err:     r.err,
 			}
 		}
 	}

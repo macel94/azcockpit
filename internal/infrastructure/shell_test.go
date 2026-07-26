@@ -217,3 +217,57 @@ func TestWriteEnvFile_SkipsCommentsAndEmptyLines(t *testing.T) {
 		t.Errorf("expected EXISTING to appear exactly once")
 	}
 }
+
+func TestSetAzAccount_ExportScriptContainsSubscription(t *testing.T) {
+	// Verify that GenerateExportScript includes both subscription ID and name.
+	sub := domain.Subscription{
+		ID:          "11111111-1111-1111-1111-111111111111",
+		DisplayName: "Integration Test Sub",
+	}
+
+	script := GenerateExportScript(sub)
+
+	// Check the two expected export lines are present.
+	if !strings.Contains(script, "export AZURE_SUBSCRIPTION_ID=") {
+		t.Error("expected AZURE_SUBSCRIPTION_ID export in script")
+	}
+	if !strings.Contains(script, "export AZURE_SUBSCRIPTION_NAME=") {
+		t.Error("expected AZURE_SUBSCRIPTION_NAME export in script")
+	}
+	if !strings.Contains(script, sub.ID) {
+		t.Errorf("expected subscription ID %q in script, got:\n%s", sub.ID, script)
+	}
+	if !strings.Contains(script, sub.DisplayName) {
+		t.Errorf("expected subscription name %q in script, got:\n%s", sub.DisplayName, script)
+	}
+
+	// Verify each line is a valid shell export statement.
+	lines := strings.Split(strings.TrimSpace(script), "\n")
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "export ") {
+			t.Errorf("expected line to start with 'export ', got: %s", line)
+		}
+		if !strings.Contains(line, "=") {
+			t.Errorf("expected line to contain '=', got: %s", line)
+		}
+	}
+}
+
+func TestGenerateExportScript_PreservesDisplayName(t *testing.T) {
+	// Verify that a subscription with a long, complex DisplayName is handled.
+	sub := domain.Subscription{
+		ID:          "sub-id",
+		DisplayName: "Project X - ML Training (GPU Cluster)",
+	}
+
+	script := GenerateExportScript(sub)
+
+	if !strings.Contains(script, sub.DisplayName) {
+		t.Errorf("expected display name %q in script, got:\n%s", sub.DisplayName, script)
+	}
+
+	// The %q format should safely quote the value.
+	if !strings.Contains(script, "export AZURE_SUBSCRIPTION_NAME=") {
+		t.Error("expected AZURE_SUBSCRIPTION_NAME in script")
+	}
+}

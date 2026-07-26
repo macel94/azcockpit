@@ -5,7 +5,10 @@ package infrastructure
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
 
@@ -24,8 +27,6 @@ type AzureClient interface {
 	ListTenants(ctx context.Context) ([]domain.Tenant, error)
 
 	// ListSubscriptions returns all subscriptions across all tenants.
-	// NOTE: The ARM subscription model does not include a TenantID field,
-	// so tenant-scoped filtering is not supported at this layer.
 	ListSubscriptions(ctx context.Context) ([]domain.Subscription, error)
 
 	// ListKeyVaults returns all Key Vaults in the given subscription.
@@ -37,24 +38,27 @@ type AzureClient interface {
 	// GetKeyVaultSecret retrieves the value of a specific secret.
 	GetKeyVaultSecret(ctx context.Context, vaultURI, secretName string) (string, error)
 
+	// SetActiveSubscription switches the Azure CLI active subscription
+	// to the given subscription within the specified tenant.
+	// If tenantID is empty, the --tenant flag is omitted.
+	SetActiveSubscription(ctx context.Context, subscriptionID, tenantID string) error
+
+	// InitializeExample creates an example Key Vault with sample secrets
+	// in the given subscription and location.
+	InitializeExample(ctx context.Context, subscriptionID, location string) (domain.KeyVault, []domain.KeyVaultSecret, error)
+
 	// GetCredential returns the underlying credential for shared use.
 	GetCredential() azcore.TokenCredential
 }
 
 // azureClient is the concrete implementation of AzureClient.
 type azureClient struct {
-	credential  azcore.TokenCredential
-	secretsMu   sync.RWMutex
+	credential     azcore.TokenCredential
+	secretsMu      sync.RWMutex
 	secretsByVault map[string]*keyVaultSecretsClient
 }
 
 // NewAzureClient creates a new AzureClient using DefaultAzureCredential.
-// DefaultAzureCredential chains:
-//
-//	EnvironmentCredential → ManagedIdentityCredential → AzureCLICredential
-//
-// This means it works seamlessly with `az login`, managed identities,
-// and service principals.
 func NewAzureClient() (AzureClient, error) {
 	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
@@ -71,10 +75,6 @@ func (c *azureClient) GetCredential() azcore.TokenCredential {
 }
 
 // ListTenants returns all Azure AD tenants visible to the authenticated user.
-// NOTE: The ARM tenants API only returns TenantID and a resource ID — it does
-// not include DisplayName, DefaultDomain, or TenantCategory.
-// Those fields will be empty in the returned domain.Tenant values unless
-// a future enhancement uses the Microsoft Graph API to enrich them.
 func (c *azureClient) ListTenants(ctx context.Context) ([]domain.Tenant, error) {
 	client, err := armsubscription.NewTenantsClient(c.credential, nil)
 	if err != nil {
@@ -97,10 +97,8 @@ func (c *azureClient) ListTenants(ctx context.Context) ([]domain.Tenant, error) 
 			tenant := domain.Tenant{
 				ID: derefString(t.TenantID),
 			}
-			// ARM tenants API does not return DisplayName, DefaultDomain,
-			// TenantCategory, or CountryCode. Set a placeholder for now.
 			if tenant.ID != "" {
-				tenant.DisplayName = tenant.ID // fallback: show GUID until enriched
+				tenant.DisplayName = tenant.ID
 			}
 			tenants = append(tenants, tenant)
 		}
@@ -158,10 +156,6 @@ func (c *azureClient) ListSubscriptions(ctx context.Context) ([]domain.Subscript
 }
 
 // ListKeyVaults returns all Key Vaults in the given subscription.
-// Uses the ARM Key Vault management plane to enumerate vaults.
-// NOTE: The list operation only returns basic resource metadata
-// (ID, Name, Location, Tags). Full properties (SKU, VaultURI, etc.)
-// require a per-vault Get call and are not populated here for Phase 1.
 func (c *azureClient) ListKeyVaults(ctx context.Context, subscriptionID string) ([]domain.KeyVault, error) {
 	client, err := armkeyvault.NewVaultsClient(subscriptionID, c.credential, nil)
 	if err != nil {
@@ -190,7 +184,6 @@ func (c *azureClient) ListKeyVaults(ctx context.Context, subscriptionID string) 
 				Tags:           copyStringMap(v.Tags),
 			}
 
-			// Extract resource group from the ARM ID.
 			if rg := extractResourceGroup(kv.ID); rg != "" {
 				kv.ResourceGroup = rg
 			}
@@ -220,8 +213,7 @@ func (c *azureClient) GetKeyVaultSecret(ctx context.Context, vaultURI, secretNam
 	return client.getSecret(ctx, secretName)
 }
 
-// getSecretsClient returns a cached or newly created data-plane secrets
-// client for the given vault URI.
+// getSecretsClient returns a cached or newly created data-plane secrets client.
 func (c *azureClient) getSecretsClient(vaultURI string) (*keyVaultSecretsClient, error) {
 	c.secretsMu.RLock()
 	client, ok := c.secretsByVault[vaultURI]
@@ -233,7 +225,6 @@ func (c *azureClient) getSecretsClient(vaultURI string) (*keyVaultSecretsClient,
 	c.secretsMu.Lock()
 	defer c.secretsMu.Unlock()
 
-	// Double-check after acquiring write lock.
 	if client, ok = c.secretsByVault[vaultURI]; ok && client != nil {
 		return client, nil
 	}
@@ -249,6 +240,128 @@ func (c *azureClient) getSecretsClient(vaultURI string) (*keyVaultSecretsClient,
 	c.secretsByVault[vaultURI] = client
 
 	return client, nil
+}
+
+// SetActiveSubscription switches the active Azure CLI subscription
+// and optionally the tenant via `az account set`.
+func (c *azureClient) SetActiveSubscription(ctx context.Context, subscriptionID, tenantID string) error {
+	azPath, err := exec.LookPath("az")
+	if err != nil {
+		return fmt.Errorf("azure CLI (az) not found in PATH: %w", err)
+	}
+
+	args := []string{"account", "set", "--subscription", subscriptionID}
+	if tenantID != "" {
+		args = append(args, "--tenant", tenantID)
+	}
+
+	cmd := exec.CommandContext(ctx, azPath, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to set az account: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	return nil
+}
+
+// InitializeExample creates an example Key Vault with a random name
+// and populates it with randomly generated sample secrets.
+func (c *azureClient) InitializeExample(ctx context.Context, subscriptionID, location string) (domain.KeyVault, []domain.KeyVaultSecret, error) {
+	azPath, err := exec.LookPath("az")
+	if err != nil {
+		return domain.KeyVault{}, nil, fmt.Errorf("azure CLI (az) not found in PATH: %w", err)
+	}
+
+	// Generate a random vault name: azcockpit-demo-<8 random hex chars>
+	randomSuffix := randomHex(4) // 4 bytes = 8 hex chars
+	vaultName := "azcockpit-demo-" + randomSuffix
+
+	// Ensure resource group exists (ignore error if it already exists).
+	rgName := "azcockpit-demo-rg"
+	_ = exec.CommandContext(ctx, azPath, "group", "create",
+		"--name", rgName,
+		"--location", location,
+		"--subscription", subscriptionID,
+	).Run()
+
+	// Create the Key Vault.
+	cmd := exec.CommandContext(ctx, azPath, "keyvault", "create",
+		"--name", vaultName,
+		"--subscription", subscriptionID,
+		"--location", location,
+		"--resource-group", rgName,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return domain.KeyVault{}, nil, fmt.Errorf("failed to create key vault: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	// Create sample secrets with random values.
+	type secretDef struct {
+		name  string
+		value string
+	}
+	secretDefs := []secretDef{
+		{name: "DEMO_DB_PASSWORD", value: randomAlphaNumeric(16)},
+		{name: "DEMO_API_KEY", value: randomHex(16)},
+		{name: "DEMO_STORAGE_CONNECTION_STRING", value: "DefaultEndpointsProtocol=https;AccountName=demo;AccountKey=" + randomHex(16)},
+	}
+
+	var secrets []domain.KeyVaultSecret
+	for _, sd := range secretDefs {
+		secretCmd := exec.CommandContext(ctx, azPath, "keyvault", "secret", "set",
+			"--vault-name", vaultName,
+			"--subscription", subscriptionID,
+			"--name", sd.name,
+			"--value", sd.value,
+		)
+		secretOutput, err := secretCmd.CombinedOutput()
+		if err != nil {
+			// Log warning but continue — best-effort secret creation.
+			_ = secretOutput
+			continue
+		}
+		secrets = append(secrets, domain.KeyVaultSecret{
+			Name:    sd.name,
+			Enabled: true,
+		})
+	}
+
+	vaultURI := fmt.Sprintf("https://%s.vault.azure.net/", vaultName)
+
+	vault := domain.KeyVault{
+		Name:           vaultName,
+		Location:       location,
+		SubscriptionID: subscriptionID,
+		ResourceGroup:  rgName,
+		Properties: domain.KeyVaultProperties{
+			VaultURI: vaultURI,
+		},
+	}
+
+	return vault, secrets, nil
+}
+
+// randomAlphaNumeric returns a random alphanumeric string of the given length.
+func randomAlphaNumeric(n int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("rand.Read failed: %v", err))
+	}
+	for i := range b {
+		b[i] = charset[int(b[i])%len(charset)]
+	}
+	return string(b)
+}
+
+// randomHex returns a random hex-encoded string of the given byte length.
+func randomHex(byteLen int) string {
+	b := make([]byte, byteLen)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("rand.Read failed: %v", err))
+	}
+	return hex.EncodeToString(b)
 }
 
 // ----- helpers -----
@@ -267,8 +380,7 @@ func derefBool(b *bool) bool {
 	return *b
 }
 
-// stringValue converts a typed string pointer (e.g., *SKUFamily, *SKUName)
-// to a plain string.
+// stringValue converts a typed string pointer to a plain string.
 func stringValue[T ~string](s *T) string {
 	if s == nil {
 		return ""
@@ -290,7 +402,6 @@ func copyStringMap(m map[string]*string) map[string]string {
 }
 
 // extractResourceGroup pulls the resource group name from an ARM resource ID.
-// Format: /subscriptions/{guid}/resourceGroups/{rgName}/providers/...
 func extractResourceGroup(armID string) string {
 	const rgSegment = "resourceGroups"
 	parts := strings.Split(armID, "/")

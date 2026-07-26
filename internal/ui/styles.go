@@ -80,3 +80,9 @@ var PaneTitleFocusedStyle = lipgloss.NewStyle().
 var PaneTitleBlurredStyle = lipgloss.NewStyle().
 	Foreground(MutedColor).
 	Bold(true)
+
+// FilterStyle highlights the active filter indicator.
+var FilterStyle = lipgloss.NewStyle().Foreground(WarningColor).Bold(true).Padding(0, 1)
+
+// ButtonStyle is used for actionable button items in lists.
+var ButtonStyle = lipgloss.NewStyle().Foreground(SuccessColor).Bold(true)
