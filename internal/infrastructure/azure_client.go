@@ -47,6 +47,10 @@ type AzureClient interface {
 	// in the given subscription and location.
 	InitializeExample(ctx context.Context, subscriptionID, location string) (domain.KeyVault, []domain.KeyVaultSecret, error)
 
+	// ExportKeyVaultSecrets fetches the actual plaintext values of all
+	// secrets in the given vault and returns them as a name→value map.
+	ExportKeyVaultSecrets(ctx context.Context, vaultURI string) (map[string]string, error)
+
 	// GetCredential returns the underlying credential for shared use.
 	GetCredential() azcore.TokenCredential
 }
@@ -225,6 +229,27 @@ func (c *azureClient) GetKeyVaultSecret(ctx context.Context, vaultURI, secretNam
 		return "", fmt.Errorf("GetKeyVaultSecret: %w", err)
 	}
 	return client.getSecret(ctx, secretName)
+}
+
+// ExportKeyVaultSecrets lists all secrets in the vault and fetches their
+// actual plaintext values, returning them as a name→value map.
+func (c *azureClient) ExportKeyVaultSecrets(ctx context.Context, vaultURI string) (map[string]string, error) {
+	secrets, err := c.ListKeyVaultSecrets(ctx, vaultURI)
+	if err != nil {
+		return nil, fmt.Errorf("ExportKeyVaultSecrets: %w", err)
+	}
+
+	values := make(map[string]string, len(secrets))
+	for _, s := range secrets {
+		val, err := c.GetKeyVaultSecret(ctx, vaultURI, s.Name)
+		if err != nil {
+			// Best-effort: skip secrets we can't read rather than failing entirely.
+			continue
+		}
+		values[s.Name] = val
+	}
+
+	return values, nil
 }
 
 // getSecretsClient returns a cached or newly created data-plane secrets client.

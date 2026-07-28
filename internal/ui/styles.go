@@ -86,3 +86,9 @@ var FilterStyle = lipgloss.NewStyle().Foreground(WarningColor).Bold(true).Paddin
 
 // ButtonStyle is used for actionable button items in lists.
 var ButtonStyle = lipgloss.NewStyle().Foreground(SuccessColor).Bold(true)
+
+// SuccessStyle is used for success confirmation messages.
+var SuccessStyle = lipgloss.NewStyle().Foreground(SuccessColor).Bold(true)
+
+// CodeStyle renders inline code-like text (monospace styled).
+var CodeStyle = lipgloss.NewStyle().Foreground(SecondaryColor).Padding(0, 2)

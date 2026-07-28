@@ -76,6 +76,16 @@ type exampleCreatedMsg struct {
 	err     error
 }
 
+// exportSecretsMsg carries the result of an ExportKeyVaultSecrets call back to the UI.
+type exportSecretsMsg struct {
+	vaultName   string
+	values      map[string]string
+	script      string // shell-exportable snippet
+	envFilePath string // .env file path if one was written
+	clipboardOK bool   // whether the script was copied to clipboard
+	err         error
+}
+
 // --- Model ---
 
 // Model is the top-level Bubble Tea model for AzCockpit.
@@ -112,6 +122,11 @@ type Model struct {
 	quitting       bool
 	filterActive   bool // whether the subscription filter input mode is active
 	exampleLoading bool // whether an example Key Vault is being created
+
+	// Export
+	exportedSecrets string            // rendered export script shown on success
+	exportValues    map[string]string // last exported name→value map
+	exportErr       error
 
 	// Dimensions
 	width  int
@@ -277,6 +292,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		m.viewState = viewSecrets
 		return m, nil
+
+	case exportSecretsMsg:
+		if msg.err != nil {
+			m.exportErr = msg.err
+			m.exportedSecrets = ""
+			return m, nil
+		}
+		m.exportValues = msg.values
+		m.exportedSecrets = msg.script
+		m.exportErr = nil
+
+		// Build a richer success summary.
+		var summary strings.Builder
+		summary.WriteString(fmt.Sprintf("  ✓ Exported %d secret(s) from %s\n", len(msg.values), msg.vaultName))
+		if msg.envFilePath != "" {
+			summary.WriteString(fmt.Sprintf("    📄 %s\n", msg.envFilePath))
+		}
+		if msg.clipboardOK {
+			summary.WriteString("    📋 Copied to clipboard\n")
+		}
+		summary.WriteString("    Run in your shell:\n")
+		summary.WriteString(msg.script)
+		m.exportedSecrets = summary.String()
+
+		return m, nil
 	}
 
 	// Keep the spinner ticking while loading.
@@ -312,6 +352,12 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "enter":
 		return m.handleEnter()
+
+	case "e":
+		// Export secrets as env vars from the secrets view.
+		if m.viewState == viewSecrets && m.selectedVault != nil {
+			return m, m.fetchExportSecrets(m.selectedVault.Properties.VaultURI, m.selectedVault.Name)
+		}
 
 	case "/":
 		// Activate filter mode on subscriptions view.
@@ -387,6 +433,10 @@ func (m Model) handleEsc() (tea.Model, tea.Cmd) {
 		m.viewState = viewVaults
 		m.cursor = 0
 		m.selectedVault = nil
+		// Clear export state so the banner vanishes on back-navigation.
+		m.exportedSecrets = ""
+		m.exportValues = nil
+		m.exportErr = nil
 		return m, nil
 
 	case viewSecretsLoading:
@@ -774,6 +824,20 @@ func (m Model) renderSecrets() string {
 		b.WriteString("\n\n")
 	}
 
+	// Export success banner
+	if m.exportedSecrets != "" {
+		b.WriteString(SuccessStyle.Render("  ✓ Secrets exported as environment variables"))
+		b.WriteString("\n\n")
+		b.WriteString(CodeStyle.Render(m.exportedSecrets))
+		b.WriteString("\n\n")
+	}
+
+	// Export error banner
+	if m.exportErr != nil {
+		b.WriteString(ErrorStyle.Render(fmt.Sprintf("  ✗ Export failed: %v", m.exportErr)))
+		b.WriteString("\n\n")
+	}
+
 	b.WriteString(TenantStyle.Render(fmt.Sprintf("Secrets (%d)", len(m.secrets))))
 	b.WriteString("\n")
 
@@ -803,7 +867,7 @@ func (m Model) renderSecrets() string {
 
 	// Footer
 	b.WriteString("\n")
-	b.WriteString(HelpStyle.Render("  ↑/↓ navigate • esc back • q quit"))
+	b.WriteString(HelpStyle.Render("  ↑/↓ navigate • e export as env vars • esc back • q quit"))
 	b.WriteString("\n")
 
 	if m.width > 0 && m.height > 0 {
@@ -946,6 +1010,72 @@ func (m Model) fetchInitializeExample(subscriptionID string) tea.Cmd {
 				vault:   r.vault,
 				secrets: r.secrets,
 				err:     r.err,
+			}
+		}
+	}
+}
+
+// fetchExportSecrets returns a tea.Cmd that asynchronously fetches all
+// secret values from the given vault, generates a shell-exportable script,
+// writes it to a secrets.env file, and copies it to the clipboard.
+func (m Model) fetchExportSecrets(vaultURI, vaultName string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), loadingTimeout)
+		defer cancel()
+
+		type result struct {
+			values map[string]string
+			err    error
+		}
+
+		ch := make(chan result, 1)
+
+		go func() {
+			values, err := m.azureClient.ExportKeyVaultSecrets(ctx, vaultURI)
+			ch <- result{values: values, err: err}
+		}()
+
+		select {
+		case <-ctx.Done():
+			return exportSecretsMsg{
+				vaultName: vaultName,
+				err:       fmt.Errorf("request timed out after %v", loadingTimeout),
+			}
+		case r := <-ch:
+			if r.err != nil {
+				return exportSecretsMsg{
+					vaultName: vaultName,
+					err:       r.err,
+				}
+			}
+
+			script := infrastructure.GenerateExportScriptForSecrets(vaultName, r.values)
+
+			// Build env file path: ./secrets_<vaultname>.env
+			envFileName := fmt.Sprintf("secrets_%s.env", vaultName)
+			envFilePath := envFileName
+
+			// Prepare KeyVaultSecret slice for WriteEnvFile so it skips
+			// existing keys (we pass values as the values map).
+			var dummySecrets []domain.KeyVaultSecret
+			written, _ := infrastructure.WriteEnvFile(envFilePath, dummySecrets, r.values)
+
+			// Best-effort clipboard copy.
+			clipboardErr := infrastructure.ExportToClipboard(script)
+			clipboardOK := clipboardErr == nil
+
+			var filePath string
+			if written > 0 {
+				filePath = envFilePath
+			}
+
+			return exportSecretsMsg{
+				vaultName:   vaultName,
+				values:      r.values,
+				script:      script,
+				envFilePath: filePath,
+				clipboardOK: clipboardOK,
+				err:         nil,
 			}
 		}
 	}

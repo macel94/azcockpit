@@ -79,6 +79,20 @@ func (m *mockAzureClient) GetCredential() azcore.TokenCredential {
 	return nil
 }
 
+func (m *mockAzureClient) ExportKeyVaultSecrets(_ context.Context, vaultURI string) (map[string]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.secrets == nil {
+		return nil, nil
+	}
+	secrets := m.secrets[vaultURI]
+	values := make(map[string]string, len(secrets))
+	for _, s := range secrets {
+		values[s.Name] = s.Name // placeholder — tests don't need real values
+	}
+	return values, nil
+}
+
 // Compile-time interface check.
 var _ AzureClient = (*mockAzureClient)(nil)
 

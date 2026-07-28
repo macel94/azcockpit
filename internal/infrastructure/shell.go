@@ -160,3 +160,27 @@ func ExportToClipboard(text string) error {
 
 	return nil
 }
+
+// GenerateExportScriptForSecrets produces a shell-sourcable snippet that
+// exports each secret as an environment variable, e.g.:
+//
+//	export DEMO_DB_PASSWORD='supersecret'
+//	export DEMO_API_KEY='abc123'
+//
+// The envValues map is name→value (e.g. from ExportKeyVaultSecrets).
+// The vaultName (if non-empty) is included as a comment in the output.
+func GenerateExportScriptForSecrets(vaultName string, envValues map[string]string) string {
+	var b strings.Builder
+
+	if vaultName != "" {
+		fmt.Fprintf(&b, "# Secrets from Azure Key Vault: %s\n", vaultName)
+	}
+
+	for name, val := range envValues {
+		// Escape single quotes for safe shell export.
+		escaped := strings.ReplaceAll(val, "'", "'\\''")
+		fmt.Fprintf(&b, "export %s='%s'\n", name, escaped)
+	}
+
+	return b.String()
+}

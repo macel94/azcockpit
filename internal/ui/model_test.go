@@ -2,10 +2,13 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/nousresearch/azcockpit/internal/domain"
 	"github.com/nousresearch/azcockpit/internal/infrastructure"
@@ -71,6 +74,24 @@ func (m *mockAzureClient) InitializeExample(ctx context.Context, subscriptionID,
 
 func (m *mockAzureClient) GetCredential() azcore.TokenCredential {
 	return nil
+}
+
+func (m *mockAzureClient) ExportKeyVaultSecrets(_ context.Context, vaultURI string) (map[string]string, error) {
+	if m.secrets == nil {
+		return nil, nil
+	}
+	secrets := m.secrets[vaultURI]
+	values := make(map[string]string, len(secrets))
+	for _, s := range secrets {
+		if m.secretValues != nil {
+			if v, ok := m.secretValues[s.Name]; ok {
+				values[s.Name] = v
+				continue
+			}
+		}
+		values[s.Name] = s.Name
+	}
+	return values, nil
 }
 
 // Compile-time check that mock implements the interface.
@@ -812,7 +833,111 @@ func TestNewModel_InitialState(t *testing.T) {
 
 func TestNewModel_CursorStartsAtZero(t *testing.T) {
 	m := makeTestModel()
-	if m.cursor != 0 {
-		t.Errorf("cursor should start at 0, got %d", m.cursor)
+	if m.tenantCursor != 0 || m.cursor != 0 {
+		t.Errorf("expected cursor=0, got tenantCursor=%d cursor=%d", m.tenantCursor, m.cursor)
+	}
+}
+
+// =============================================================================
+// Export keybinding tests
+// =============================================================================
+
+func TestModelHandleExport_FromSecretsView(t *testing.T) {
+	m := makeTestModel()
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault", Properties: domain.KeyVaultProperties{VaultURI: "https://test-vault.vault.azure.net/"}}
+	m.secrets = []domain.KeyVaultSecret{
+		{Name: "DEMO_DB_PASSWORD", Enabled: true},
+		{Name: "DEMO_API_KEY", Enabled: true},
+	}
+
+	// Simulate pressing 'e' — should trigger fetchExportSecrets cmd.
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+
+	// The model should remain in viewSecrets and the cmd should not be nil.
+	if model.(Model).viewState != viewSecrets {
+		t.Errorf("expected viewSecrets, got %v", model.(Model).viewState)
+	}
+	if cmd == nil {
+		t.Error("expected non-nil cmd from 'e' keypress on secrets view")
+	}
+}
+
+func TestModelHandleExport_FromVaultsView_NoOp(t *testing.T) {
+	m := makeTestModel()
+	m.viewState = viewVaults
+
+	// Pressing 'e' from vaults view should be a no-op.
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+
+	if cmd != nil {
+		t.Error("expected nil cmd from 'e' keypress on vaults view")
+	}
+	_ = model // model unchanged
+}
+
+func TestModelRenderSecrets_WithExportBanner(t *testing.T) {
+	m := makeTestModel()
+	m.loading = false
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
+	m.secrets = []domain.KeyVaultSecret{
+		{Name: "DEMO_DB_PASSWORD", Enabled: true},
+	}
+	m.exportedSecrets = "  ✓ Exported 1 secret(s) from test-vault\n    📄 secrets_test-vault.env\n    📋 Copied to clipboard\n    Run in your shell:\nexport DEMO_DB_PASSWORD='supersecret'\n"
+
+	view := m.View()
+	if !strings.Contains(view, "✓") {
+		t.Error("expected export success banner (✓) in rendered view")
+	}
+	if !strings.Contains(view, "export DEMO_DB_PASSWORD") {
+		t.Error("expected export script in rendered view")
+	}
+	if !strings.Contains(view, "secrets_test-vault.env") {
+		t.Error("expected env file path in rendered view")
+	}
+}
+
+func TestModelRenderSecrets_WithExportError(t *testing.T) {
+	m := makeTestModel()
+	m.loading = false
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
+	m.secrets = []domain.KeyVaultSecret{
+		{Name: "DEMO_DB_PASSWORD", Enabled: true},
+	}
+	m.exportErr = fmt.Errorf("test export error")
+
+	view := m.View()
+	if !strings.Contains(view, "✗") {
+		t.Error("expected export error banner (✗) in rendered view")
+	}
+	if !strings.Contains(view, "test export error") {
+		t.Error("expected error message in rendered view")
+	}
+}
+
+func TestModelEsc_ClearsExportState(t *testing.T) {
+	m := makeTestModel()
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
+	m.exportedSecrets = "some export data"
+	m.exportErr = nil
+	m.exportValues = map[string]string{"KEY": "val"}
+
+	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated := model.(Model)
+
+	if updated.exportedSecrets != "" {
+		t.Error("expected exportedSecrets cleared on esc from viewSecrets")
+	}
+	if updated.exportValues != nil {
+		t.Error("expected exportValues cleared on esc from viewSecrets")
+	}
+	if updated.exportErr != nil {
+		t.Error("expected exportErr cleared on esc from viewSecrets")
+	}
+	if updated.viewState != viewVaults {
+		t.Errorf("expected viewVaults after esc from viewSecrets, got %v", updated.viewState)
 	}
 }
