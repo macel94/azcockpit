@@ -96,9 +96,9 @@ func (m *mockAzureClient) ExportKeyVaultSecrets(_ context.Context, vaultURI stri
 
 func (m *mockAzureClient) PopulateRandomSecrets(_ context.Context, vaultURI, vaultName, subscriptionID string) ([]domain.KeyVaultSecret, error) {
 	secrets := []domain.KeyVaultSecret{
-		{Name: "DEMO_DB_PASSWORD", Enabled: true},
-		{Name: "DEMO_API_KEY", Enabled: true},
-		{Name: "DEMO_STORAGE_CONNECTION_STRING", Enabled: true},
+		{Name: "DEMO-DB-PASSWORD", Enabled: true},
+		{Name: "DEMO-API-KEY", Enabled: true},
+		{Name: "DEMO-STORAGE-CONNECTION-STRING", Enabled: true},
 	}
 	return secrets, nil
 }
@@ -864,8 +864,8 @@ func TestModelHandleExport_FromSecretsView(t *testing.T) {
 	m.viewState = viewSecrets
 	m.selectedVault = &domain.KeyVault{Name: "test-vault", Properties: domain.KeyVaultProperties{VaultURI: "https://test-vault.vault.azure.net/"}}
 	m.secrets = []domain.KeyVaultSecret{
-		{Name: "DEMO_DB_PASSWORD", Enabled: true},
-		{Name: "DEMO_API_KEY", Enabled: true},
+		{Name: "DEMO-DB-PASSWORD", Enabled: true},
+		{Name: "DEMO-API-KEY", Enabled: true},
 	}
 
 	// Simulate pressing 'e' — should trigger fetchExportSecrets cmd.
@@ -921,7 +921,7 @@ func TestModelRenderSecrets_WithExportError(t *testing.T) {
 	m.viewState = viewSecrets
 	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
 	m.secrets = []domain.KeyVaultSecret{
-		{Name: "DEMO_DB_PASSWORD", Enabled: true},
+		{Name: "DEMO-DB-PASSWORD", Enabled: true},
 	}
 	m.exportErr = fmt.Errorf("test export error")
 
@@ -1045,9 +1045,9 @@ func TestModelHandlePopulateMsg_SetsSecretsAndRefetches(t *testing.T) {
 	msg := populateSecretsMsg{
 		vaultURI: "https://test-vault.vault.azure.net/",
 		secrets: []domain.KeyVaultSecret{
-			{Name: "DEMO_DB_PASSWORD", Enabled: true},
-			{Name: "DEMO_API_KEY", Enabled: true},
-			{Name: "DEMO_STORAGE_CONNECTION_STRING", Enabled: true},
+			{Name: "DEMO-DB-PASSWORD", Enabled: true},
+			{Name: "DEMO-API-KEY", Enabled: true},
+			{Name: "DEMO-STORAGE-CONNECTION-STRING", Enabled: true},
 		},
 		err: nil,
 	}
@@ -1139,7 +1139,7 @@ func TestModelRenderSecrets_WithPopulateSuccessBanner(t *testing.T) {
 	m.viewState = viewSecrets
 	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
 	m.secrets = []domain.KeyVaultSecret{
-		{Name: "DEMO_DB_PASSWORD", Enabled: true},
+		{Name: "DEMO-DB-PASSWORD", Enabled: true},
 	}
 	m.populateMessage = "  ✓ Added 3 random demo secret(s) to this vault"
 

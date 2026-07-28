@@ -3,6 +3,7 @@ package infrastructure
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -49,6 +50,60 @@ func TestGenerateExportScript_SpecialCharacters(t *testing.T) {
 	// The %q format escapes quotes, so the display name should contain escaped quotes.
 	if !strings.Contains(script, `My \"Special\" Subscription`) {
 		t.Errorf("expected escaped quotes in display name, got:\n%s", script)
+	}
+}
+
+func TestGenerateExportScriptForSecrets_HyphensToUnderscores(t *testing.T) {
+	// Azure Key Vault secret names use hyphens (because the API rejects
+	// underscores). The export script must convert hyphens to underscores
+	// so the result is a valid POSIX env var name.
+	values := map[string]string{
+		"DEMO-DB-PASSWORD":           "super-secret",
+		"DEMO-API-KEY":               "abc123",
+		"DEMO-STORAGE-CONNECTION-STRING": "key123",
+	}
+
+	script := GenerateExportScriptForSecrets("my-vault", values)
+
+	// Hyphens should be converted to underscores.
+	must := []string{
+		"export DEMO_DB_PASSWORD='super-secret'",
+		"export DEMO_API_KEY='abc123'",
+		"export DEMO_STORAGE_CONNECTION_STRING='key123'",
+	}
+	for _, want := range must {
+		if !strings.Contains(script, want) {
+			t.Errorf("expected %q in script, got:\n%s", want, script)
+		}
+	}
+
+	// The original hyphenated names should NOT appear in the env var lines.
+	if strings.Contains(script, "export DEMO-DB-PASSWORD") {
+		t.Errorf("hyphenated name should not appear in export script, got:\n%s", script)
+	}
+
+	// The vault name should appear as a comment.
+	if !strings.Contains(script, "# Secrets from Azure Key Vault: my-vault") {
+		t.Error("expected vault name in comment header")
+	}
+}
+
+func TestDemoSecretNames_AreAzureKeyVaultValid(t *testing.T) {
+	// Azure Key Vault secret names must match ^[0-9a-zA-Z-]+$ — no
+	// underscores. This test guards against accidentally adding a
+	// name with an underscore, which would cause the Azure REST API to
+	// reject the secret creation with "BadParameter: The request URI
+	// contains an invalid name".
+	azValid := regexp.MustCompile(`^[0-9a-zA-Z-]+$`)
+
+	if len(demoSecretNames) != 3 {
+		t.Errorf("expected 3 demo secret names, got %d", len(demoSecretNames))
+	}
+
+	for _, name := range demoSecretNames {
+		if !azValid.MatchString(name) {
+			t.Errorf("demo secret name %q is not valid for Azure Key Vault (must match ^[0-9a-zA-Z-]+$)", name)
+		}
 	}
 }
 

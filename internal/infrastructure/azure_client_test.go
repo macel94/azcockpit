@@ -95,9 +95,9 @@ func (m *mockAzureClient) ExportKeyVaultSecrets(_ context.Context, vaultURI stri
 
 func (m *mockAzureClient) PopulateRandomSecrets(_ context.Context, _, _, _ string) ([]domain.KeyVaultSecret, error) {
 	return []domain.KeyVaultSecret{
-		{Name: "DEMO_DB_PASSWORD", Enabled: true},
-		{Name: "DEMO_API_KEY", Enabled: true},
-		{Name: "DEMO_STORAGE_CONNECTION_STRING", Enabled: true},
+		{Name: "DEMO-DB-PASSWORD", Enabled: true},
+		{Name: "DEMO-API-KEY", Enabled: true},
+		{Name: "DEMO-STORAGE-CONNECTION-STRING", Enabled: true},
 	}, nil
 }
 

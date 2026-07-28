@@ -59,6 +59,38 @@ type AzureClient interface {
 	GetCredential() azcore.TokenCredential
 }
 
+// demoSecretNames are the names of the random demo secrets created by
+// InitializeExample and PopulateRandomSecrets.
+//
+// IMPORTANT: Azure Key Vault secret names must match ^[0-9a-zA-Z-]+$.
+// Underscores are rejected by the Azure REST API ("The request URI
+// contains an invalid name"). When exporting these secrets as shell
+// environment variables, hyphens are converted to underscores (see
+// GenerateExportScriptForSecrets).
+var demoSecretNames = []string{
+	"DEMO-DB-PASSWORD",
+	"DEMO-API-KEY",
+	"DEMO-STORAGE-CONNECTION-STRING",
+}
+
+// demoSecretDef is a single demo secret (name, value) pair.
+type demoSecretDef struct {
+	name  string
+	value string
+}
+
+// demoSecretDefs returns a fresh random demo secret set (3 secrets with
+// freshly generated values). Used by InitializeExample and
+// PopulateRandomSecrets. Names conform to Azure Key Vault naming rules
+// (alphanumeric + hyphens; no underscores).
+func demoSecretDefs() []demoSecretDef {
+	return []demoSecretDef{
+		{name: demoSecretNames[0], value: randomAlphaNumeric(16)},
+		{name: demoSecretNames[1], value: randomHex(16)},
+		{name: demoSecretNames[2], value: "DefaultEndpointsProtocol=https;AccountName=demo;AccountKey=" + randomHex(16)},
+	}
+}
+
 // azureClient is the concrete implementation of AzureClient.
 type azureClient struct {
 	credential     azcore.TokenCredential
@@ -265,16 +297,8 @@ func (c *azureClient) PopulateRandomSecrets(ctx context.Context, vaultURI, vault
 		return nil, fmt.Errorf("azure CLI (az) not found in PATH: %w", err)
 	}
 
-	// Use the same secret definitions as InitializeExample.
-	type secretDef struct {
-		name  string
-		value string
-	}
-	secretDefs := []secretDef{
-		{name: "DEMO_DB_PASSWORD", value: randomAlphaNumeric(16)},
-		{name: "DEMO_API_KEY", value: randomHex(16)},
-		{name: "DEMO_STORAGE_CONNECTION_STRING", value: "DefaultEndpointsProtocol=https;AccountName=demo;AccountKey=" + randomHex(16)},
-	}
+	// Generate a fresh random secret defs (so each call produces new values).
+	secretDefs := demoSecretDefs()
 
 	var secrets []domain.KeyVaultSecret
 	for _, sd := range secretDefs {
@@ -414,15 +438,7 @@ func (c *azureClient) InitializeExample(ctx context.Context, subscriptionID, loc
 	}
 
 	// Create sample secrets with random values.
-	type secretDef struct {
-		name  string
-		value string
-	}
-	secretDefs := []secretDef{
-		{name: "DEMO_DB_PASSWORD", value: randomAlphaNumeric(16)},
-		{name: "DEMO_API_KEY", value: randomHex(16)},
-		{name: "DEMO_STORAGE_CONNECTION_STRING", value: "DefaultEndpointsProtocol=https;AccountName=demo;AccountKey=" + randomHex(16)},
-	}
+	secretDefs := demoSecretDefs()
 
 	var secrets []domain.KeyVaultSecret
 	for _, sd := range secretDefs {

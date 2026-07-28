@@ -164,10 +164,14 @@ func ExportToClipboard(text string) error {
 // GenerateExportScriptForSecrets produces a shell-sourcable snippet that
 // exports each secret as an environment variable, e.g.:
 //
+//	# Secrets from Azure Key Vault: my-vault
 //	export DEMO_DB_PASSWORD='supersecret'
 //	export DEMO_API_KEY='abc123'
 //
 // The envValues map is name→value (e.g. from ExportKeyVaultSecrets).
+// Hyphens in secret names are converted to underscores so the output is
+// a valid POSIX environment variable name (Azure Key Vault requires
+// hyphens in secret names, but POSIX env vars allow underscores only).
 // The vaultName (if non-empty) is included as a comment in the output.
 func GenerateExportScriptForSecrets(vaultName string, envValues map[string]string) string {
 	var b strings.Builder
@@ -177,9 +181,11 @@ func GenerateExportScriptForSecrets(vaultName string, envValues map[string]strin
 	}
 
 	for name, val := range envValues {
+		// Convert hyphens to underscores for valid POSIX env var names.
+		envName := strings.ReplaceAll(name, "-", "_")
 		// Escape single quotes for safe shell export.
 		escaped := strings.ReplaceAll(val, "'", "'\\''")
-		fmt.Fprintf(&b, "export %s='%s'\n", name, escaped)
+		fmt.Fprintf(&b, "export %s='%s'\n", envName, escaped)
 	}
 
 	return b.String()
