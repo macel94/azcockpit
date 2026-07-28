@@ -280,6 +280,9 @@ func (c *azureClient) SetActiveSubscription(ctx context.Context, subscriptionID,
 
 // InitializeExample creates an example Key Vault with a random name
 // and populates it with randomly generated sample secrets.
+// The vault is created with the access-policy permission model and the
+// current user is granted full secret permissions so that the data-plane
+// azsecrets client can list and get secrets without authorization errors.
 func (c *azureClient) InitializeExample(ctx context.Context, subscriptionID, location string) (domain.KeyVault, []domain.KeyVaultSecret, error) {
 	azPath, err := exec.LookPath("az")
 	if err != nil {
@@ -306,16 +309,33 @@ func (c *azureClient) InitializeExample(ctx context.Context, subscriptionID, loc
 		"--subscription", subscriptionID,
 	).Run()
 
-	// Create the Key Vault.
+	// Create the Key Vault with explicit access-policy permission model.
+	// NOTE: newer Azure CLI versions default to RBAC, which does NOT
+	// automatically grant the creator data-plane permissions. Using
+	// --enable-rbac-authorization false ensures the classic access-policy
+	// model is used, and we then add the user to the access policies below.
 	cmd := exec.CommandContext(ctx, azPath, "keyvault", "create",
 		"--name", vaultName,
 		"--subscription", subscriptionID,
 		"--location", location,
 		"--resource-group", rgName,
+		"--enable-rbac-authorization", "false",
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return domain.KeyVault{}, nil, fmt.Errorf("failed to create key vault: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	// Best-effort: add the current user to the vault's access policies
+	// with full secret permissions. This is idempotent and ensures the
+	// data-plane azsecrets client can list and get secrets.
+	if oid := getCurrentUserObjectID(ctx, azPath); oid != "" {
+		_ = exec.CommandContext(ctx, azPath, "keyvault", "set-policy",
+			"--name", vaultName,
+			"--subscription", subscriptionID,
+			"--object-id", oid,
+			"--secret-permissions", "get", "list",
+		).Run()
 	}
 
 	// Create sample secrets with random values.
@@ -387,6 +407,19 @@ func randomHex(byteLen int) string {
 }
 
 // ----- helpers -----
+
+// getCurrentUserObjectID returns the object ID of the currently authenticated
+// Azure user by calling `az ad signed-in-user show`. Returns empty string if
+// the user cannot be determined (e.g. service principal, no `az` CLI, or
+// missing permissions).
+func getCurrentUserObjectID(ctx context.Context, azPath string) string {
+	cmd := exec.CommandContext(ctx, azPath, "ad", "signed-in-user", "show", "--query", "id", "-o", "tsv")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
 
 func derefString(s *string) string {
 	if s == nil {
