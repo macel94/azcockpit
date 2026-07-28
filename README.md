@@ -35,25 +35,39 @@ A lightning-fast TUI for navigating Azure tenants, subscriptions, and Key Vaults
 
 ### Prerequisites
 - **Go 1.26+**
+- **make**
 - **Azure authentication** (any of):
   - `az login` (Azure CLI)
   - Environment variables: `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`
   - Managed Identity (on Azure VMs/App Service)
 
-### Install
+### Install & Run
 
 ```bash
 git clone https://github.com/macel94/azcockpit.git
 cd azcockpit
-go build -o azcockpit ./cmd/azcockpit/
-./azcockpit
-```
 
-Or run directly:
+# Build and run with a single command
+make run
 
-```bash
+# Build only
+make
+
+# Or run directly without building first
 go run ./cmd/azcockpit/
 ```
+
+## Makefile Targets
+
+| Command | Action |
+|---------|--------|
+| `make` (or `make build`) | Build the `azcockpit` binary |
+| `make run` | Build and launch the TUI |
+| `make test` | Run all tests |
+| `make race` | Run tests with the Go race detector |
+| `make vet` | Run `go vet` |
+| `make install` | Install to `~/go/bin/azcockpit` |
+| `make clean` | Remove build artifacts |
 
 ## Navigation
 
@@ -99,10 +113,14 @@ Domain Layer
 ## Testing
 
 ```bash
+make test        # all tests with verbose output
+make race        # with Go race detector
+
+# Or directly:
 go test ./... -v -count=1
 ```
 
-**40 tests** across 2 packages covering domain models, cache TTL/expiry, concurrent reads, ARM ID parsing, and shell helpers.
+**40+ tests** across 3 packages covering domain models, cache TTL/expiry, concurrent reads, ARM ID parsing, shell helpers, and UI navigation.
 
 ## Roadmap
 
