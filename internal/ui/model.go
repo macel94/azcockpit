@@ -86,6 +86,13 @@ type exportSecretsMsg struct {
 	err         error
 }
 
+// populateSecretsMsg carries the result of a PopulateRandomSecrets call back to the UI.
+type populateSecretsMsg struct {
+	vaultURI string
+	secrets  []domain.KeyVaultSecret
+	err      error
+}
+
 // --- Model ---
 
 // Model is the top-level Bubble Tea model for AzCockpit.
@@ -127,6 +134,11 @@ type Model struct {
 	exportedSecrets string            // rendered export script shown on success
 	exportValues    map[string]string // last exported name→value map
 	exportErr       error
+
+	// Populate (add random secrets to existing vault)
+	populateMessage string // success/confirmation message after adding secrets
+	populateErr     error
+	populateLoading bool
 
 	// Dimensions
 	width  int
@@ -236,7 +248,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if m.loading || m.viewState == viewVaultsLoading || m.viewState == viewSecretsLoading || m.exampleLoading {
+		if m.loading || m.viewState == viewVaultsLoading || m.viewState == viewSecretsLoading || m.exampleLoading || m.populateLoading {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
@@ -317,6 +329,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.exportedSecrets = summary.String()
 
 		return m, nil
+
+	case populateSecretsMsg:
+		m.populateLoading = false
+		if msg.err != nil {
+			m.populateErr = msg.err
+			m.populateMessage = ""
+			return m, nil
+		}
+		m.populateErr = nil
+		m.populateMessage = fmt.Sprintf("  ✓ Added %d random demo secret(s) to this vault", len(msg.secrets))
+		// Re-fetch the full secrets list so the UI reflects the new secrets.
+		return m, m.fetchSecrets(msg.vaultURI)
 	}
 
 	// Keep the spinner ticking while loading.
@@ -357,6 +381,17 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Export secrets as env vars from the secrets view.
 		if m.viewState == viewSecrets && m.selectedVault != nil {
 			return m, m.fetchExportSecrets(m.selectedVault.Properties.VaultURI, m.selectedVault.Name)
+		}
+
+	case "a":
+		// Add 3 random demo secrets to the current vault.
+		if m.viewState == viewSecrets && m.selectedVault != nil && m.selectedSubscription != nil {
+			m.populateLoading = true
+			return m, m.fetchPopulateSecrets(
+				m.selectedVault.Properties.VaultURI,
+				m.selectedVault.Name,
+				m.selectedSubscription.ID,
+			)
 		}
 
 	case "/":
@@ -433,10 +468,13 @@ func (m Model) handleEsc() (tea.Model, tea.Cmd) {
 		m.viewState = viewVaults
 		m.cursor = 0
 		m.selectedVault = nil
-		// Clear export state so the banner vanishes on back-navigation.
+		// Clear export and populate state so banners vanish on back-navigation.
 		m.exportedSecrets = ""
 		m.exportValues = nil
 		m.exportErr = nil
+		m.populateMessage = ""
+		m.populateErr = nil
+		m.populateLoading = false
 		return m, nil
 
 	case viewSecretsLoading:
@@ -491,7 +529,8 @@ func (m Model) handleDown() (tea.Model, tea.Cmd) {
 			m.cursor++
 		}
 	case viewSecrets:
-		if len(m.secrets) > 0 && m.cursor < len(m.secrets)-1 {
+		// +1 for the [+] Add 3 Random Demo Secrets button.
+		if m.cursor < len(m.secrets) {
 			m.cursor++
 		}
 	}
@@ -526,6 +565,19 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 			m.selectedVault = &vault
 			m.viewState = viewSecretsLoading
 			return m, m.fetchSecrets(vault.Properties.VaultURI)
+		}
+
+	case viewSecrets:
+		// Check if cursor is on the [+] Add 3 Random Demo Secrets button.
+		if m.cursor == len(m.secrets) {
+			if m.selectedVault != nil && m.selectedSubscription != nil {
+				m.populateLoading = true
+				return m, m.fetchPopulateSecrets(
+					m.selectedVault.Properties.VaultURI,
+					m.selectedVault.Name,
+					m.selectedSubscription.ID,
+				)
+			}
 		}
 	}
 
@@ -838,6 +890,18 @@ func (m Model) renderSecrets() string {
 		b.WriteString("\n\n")
 	}
 
+	// Populate success banner
+	if m.populateMessage != "" {
+		b.WriteString(SuccessStyle.Render(m.populateMessage))
+		b.WriteString("\n\n")
+	}
+
+	// Populate error banner
+	if m.populateErr != nil {
+		b.WriteString(ErrorStyle.Render(fmt.Sprintf("  ✗ Failed to add secrets: %v", m.populateErr)))
+		b.WriteString("\n\n")
+	}
+
 	b.WriteString(TenantStyle.Render(fmt.Sprintf("Secrets (%d)", len(m.secrets))))
 	b.WriteString("\n")
 
@@ -865,9 +929,25 @@ func (m Model) renderSecrets() string {
 		}
 	}
 
+	// [+] Add 3 Random Demo Secrets button
+	if m.populateLoading {
+		line := fmt.Sprintf("  %s [+] Adding 3 Random Demo Secrets...", m.spinner.View())
+		if m.cursor == len(m.secrets) {
+			line = SelectedStyle.Render(line)
+		}
+		b.WriteString(line)
+	} else {
+		line := ButtonStyle.Render("  [+] Add 3 Random Demo Secrets")
+		if m.cursor == len(m.secrets) {
+			line = SelectedStyle.Render(line)
+		}
+		b.WriteString(line)
+	}
+	b.WriteString("\n")
+
 	// Footer
 	b.WriteString("\n")
-	b.WriteString(HelpStyle.Render("  ↑/↓ navigate • e export as env vars • esc back • q quit"))
+	b.WriteString(HelpStyle.Render("  ↑/↓ navigate • e export as env vars • a add secrets • esc back • q quit"))
 	b.WriteString("\n")
 
 	if m.width > 0 && m.height > 0 {
@@ -1076,6 +1156,41 @@ func (m Model) fetchExportSecrets(vaultURI, vaultName string) tea.Cmd {
 				envFilePath: filePath,
 				clipboardOK: clipboardOK,
 				err:         nil,
+			}
+		}
+	}
+}
+
+// fetchPopulateSecrets returns a tea.Cmd that asynchronously adds 3 random
+// demo secrets to the given existing vault.
+func (m Model) fetchPopulateSecrets(vaultURI, vaultName, subscriptionID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), loadingTimeout)
+		defer cancel()
+
+		type result struct {
+			secrets []domain.KeyVaultSecret
+			err     error
+		}
+
+		ch := make(chan result, 1)
+
+		go func() {
+			secrets, err := m.azureClient.PopulateRandomSecrets(ctx, vaultURI, vaultName, subscriptionID)
+			ch <- result{secrets: secrets, err: err}
+		}()
+
+		select {
+		case <-ctx.Done():
+			return populateSecretsMsg{
+				vaultURI: vaultURI,
+				err:      fmt.Errorf("request timed out after %v", loadingTimeout),
+			}
+		case r := <-ch:
+			return populateSecretsMsg{
+				vaultURI: vaultURI,
+				secrets:  r.secrets,
+				err:      r.err,
 			}
 		}
 	}

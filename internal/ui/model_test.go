@@ -94,6 +94,15 @@ func (m *mockAzureClient) ExportKeyVaultSecrets(_ context.Context, vaultURI stri
 	return values, nil
 }
 
+func (m *mockAzureClient) PopulateRandomSecrets(_ context.Context, vaultURI, vaultName, subscriptionID string) ([]domain.KeyVaultSecret, error) {
+	secrets := []domain.KeyVaultSecret{
+		{Name: "DEMO_DB_PASSWORD", Enabled: true},
+		{Name: "DEMO_API_KEY", Enabled: true},
+		{Name: "DEMO_STORAGE_CONNECTION_STRING", Enabled: true},
+	}
+	return secrets, nil
+}
+
 // Compile-time check that mock implements the interface.
 var _ infrastructure.AzureClient = (*mockAzureClient)(nil)
 
@@ -332,8 +341,16 @@ func TestModelNavigateSecretsDown_Boundary(t *testing.T) {
 
 	updated, _ := m.handleDown()
 	newM := updated.(Model)
-	if newM.cursor != 1 {
-		t.Errorf("cursor should stay at 1 when pressing down at bottom of secrets, got %d", newM.cursor)
+	// Cursor moves to the [+] Add 3 Random Demo Secrets button position (= len(secrets)).
+	if newM.cursor != 2 {
+		t.Errorf("cursor should move to button position (2) when pressing down from last secret, got %d", newM.cursor)
+	}
+
+	// Pressing down again should stay at the button.
+	updated2, _ := newM.handleDown()
+	newM2 := updated2.(Model)
+	if newM2.cursor != 2 {
+		t.Errorf("cursor should stay at 2 when pressing down on button, got %d", newM2.cursor)
 	}
 }
 
@@ -936,6 +953,221 @@ func TestModelEsc_ClearsExportState(t *testing.T) {
 	}
 	if updated.exportErr != nil {
 		t.Error("expected exportErr cleared on esc from viewSecrets")
+	}
+	if updated.viewState != viewVaults {
+		t.Errorf("expected viewVaults after esc from viewSecrets, got %v", updated.viewState)
+	}
+}
+
+// =============================================================================
+// Populate (add random secrets) tests
+// =============================================================================
+
+func TestModelHandlePopulate_FromSecretsView(t *testing.T) {
+	m := makeTestModel()
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault", Properties: domain.KeyVaultProperties{VaultURI: "https://test-vault.vault.azure.net/"}}
+	m.selectedSubscription = &domain.Subscription{ID: "sub-123", DisplayName: "Test Sub"}
+	m.secrets = []domain.KeyVaultSecret{
+		{Name: "EXISTING_SECRET", Enabled: true},
+	}
+
+	// Press 'a' from secrets view.
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+
+	updated := model.(Model)
+	if !updated.populateLoading {
+		t.Error("expected populateLoading=true after 'a' keypress")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil cmd from 'a' keypress on secrets view")
+	}
+}
+
+func TestModelHandlePopulate_FromVaultsView_NoOp(t *testing.T) {
+	m := makeTestModel()
+	m.viewState = viewVaults
+
+	// 'a' from vaults view should be a no-op.
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+
+	if cmd != nil {
+		t.Error("expected nil cmd from 'a' keypress on vaults view")
+	}
+	_ = model
+}
+
+func TestModelHandlePopulate_FromSecretsView_MissingSubscription(t *testing.T) {
+	m := makeTestModel()
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
+	m.selectedSubscription = nil // no subscription
+
+	// 'a' should be a no-op without a subscription.
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+
+	if cmd != nil {
+		t.Error("expected nil cmd when selectedSubscription is nil")
+	}
+	_ = model
+}
+
+func TestModelHandleEnter_OnPopulateButton(t *testing.T) {
+	m := makeTestModel()
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault", Properties: domain.KeyVaultProperties{VaultURI: "https://test-vault.vault.azure.net/"}}
+	m.selectedSubscription = &domain.Subscription{ID: "sub-123"}
+	m.secrets = []domain.KeyVaultSecret{
+		{Name: "EXISTING_SECRET", Enabled: true},
+	}
+	// Cursor at button position = len(secrets).
+	m.cursor = 1
+
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := model.(Model)
+
+	if !updated.populateLoading {
+		t.Error("expected populateLoading=true after enter on button")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil cmd after enter on populate button")
+	}
+}
+
+func TestModelHandlePopulateMsg_SetsSecretsAndRefetches(t *testing.T) {
+	m := makeTestModel()
+	m.loading = false
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault", Properties: domain.KeyVaultProperties{VaultURI: "https://test-vault.vault.azure.net/"}}
+	m.secrets = []domain.KeyVaultSecret{}
+
+	// Simulate receiving a populateSecretsMsg with 3 new secrets.
+	msg := populateSecretsMsg{
+		vaultURI: "https://test-vault.vault.azure.net/",
+		secrets: []domain.KeyVaultSecret{
+			{Name: "DEMO_DB_PASSWORD", Enabled: true},
+			{Name: "DEMO_API_KEY", Enabled: true},
+			{Name: "DEMO_STORAGE_CONNECTION_STRING", Enabled: true},
+		},
+		err: nil,
+	}
+
+	model, cmd := m.Update(msg)
+	updated := model.(Model)
+
+	if updated.populateLoading {
+		t.Error("expected populateLoading=false after populateSecretsMsg")
+	}
+	if updated.populateErr != nil {
+		t.Errorf("unexpected error: %v", updated.populateErr)
+	}
+	if !strings.Contains(updated.populateMessage, "Added 3") {
+		t.Errorf("expected success message containing 'Added 3', got %q", updated.populateMessage)
+	}
+	// Should trigger a re-fetch of secrets.
+	if cmd == nil {
+		t.Error("expected non-nil cmd (secrets re-fetch) after populateSecretsMsg")
+	}
+}
+
+func TestModelHandlePopulateMsg_Error(t *testing.T) {
+	m := makeTestModel()
+	m.loading = false
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
+	m.populateLoading = true
+
+	msg := populateSecretsMsg{
+		vaultURI: "https://test-vault.vault.azure.net/",
+		err:      fmt.Errorf("create secrets failed"),
+	}
+
+	model, cmd := m.Update(msg)
+	updated := model.(Model)
+
+	if updated.populateLoading {
+		t.Error("expected populateLoading=false after error")
+	}
+	if updated.populateErr == nil {
+		t.Error("expected populateErr to be set")
+	}
+	if updated.populateMessage != "" {
+		t.Error("expected populateMessage to be empty on error")
+	}
+	if cmd != nil {
+		t.Error("expected nil cmd on error")
+	}
+}
+
+func TestModelRenderSecrets_WithPopulateButton(t *testing.T) {
+	m := makeTestModel()
+	m.loading = false
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
+	m.secrets = []domain.KeyVaultSecret{
+		{Name: "EXISTING_SECRET", Enabled: true},
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "[+] Add 3 Random Demo Secrets") {
+		t.Error("expected [+] Add 3 Random Demo Secrets button in rendered view")
+	}
+	if !strings.Contains(view, "a add secrets") {
+		t.Error("expected 'a add secrets' hint in footer")
+	}
+}
+
+func TestModelRenderSecrets_WithPopulateLoadingSpinner(t *testing.T) {
+	m := makeTestModel()
+	m.loading = false
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
+	m.secrets = []domain.KeyVaultSecret{
+		{Name: "EXISTING_SECRET", Enabled: true},
+	}
+	m.populateLoading = true
+
+	view := m.View()
+	if !strings.Contains(view, "Adding 3 Random Demo Secrets...") {
+		t.Error("expected 'Adding 3 Random Demo Secrets...' loading text in rendered view")
+	}
+}
+
+func TestModelRenderSecrets_WithPopulateSuccessBanner(t *testing.T) {
+	m := makeTestModel()
+	m.loading = false
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
+	m.secrets = []domain.KeyVaultSecret{
+		{Name: "DEMO_DB_PASSWORD", Enabled: true},
+	}
+	m.populateMessage = "  ✓ Added 3 random demo secret(s) to this vault"
+
+	view := m.View()
+	if !strings.Contains(view, "✓ Added 3") {
+		t.Error("expected success banner with '✓ Added 3' in rendered view")
+	}
+}
+
+func TestModelEsc_ClearsPopulateState(t *testing.T) {
+	m := makeTestModel()
+	m.viewState = viewSecrets
+	m.selectedVault = &domain.KeyVault{Name: "test-vault"}
+	m.populateMessage = "some message"
+	m.populateErr = nil
+	m.populateLoading = true
+
+	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated := model.(Model)
+
+	if updated.populateMessage != "" {
+		t.Error("expected populateMessage cleared on esc from viewSecrets")
+	}
+	if updated.populateErr != nil {
+		t.Error("expected populateErr cleared on esc from viewSecrets")
+	}
+	if updated.populateLoading {
+		t.Error("expected populateLoading cleared on esc from viewSecrets")
 	}
 	if updated.viewState != viewVaults {
 		t.Errorf("expected viewVaults after esc from viewSecrets, got %v", updated.viewState)

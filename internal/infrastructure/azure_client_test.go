@@ -93,6 +93,14 @@ func (m *mockAzureClient) ExportKeyVaultSecrets(_ context.Context, vaultURI stri
 	return values, nil
 }
 
+func (m *mockAzureClient) PopulateRandomSecrets(_ context.Context, _, _, _ string) ([]domain.KeyVaultSecret, error) {
+	return []domain.KeyVaultSecret{
+		{Name: "DEMO_DB_PASSWORD", Enabled: true},
+		{Name: "DEMO_API_KEY", Enabled: true},
+		{Name: "DEMO_STORAGE_CONNECTION_STRING", Enabled: true},
+	}, nil
+}
+
 // Compile-time interface check.
 var _ AzureClient = (*mockAzureClient)(nil)
 

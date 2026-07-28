@@ -92,5 +92,6 @@ No API keys are stored by AzCockpit itself.
 - [x] Phase 1: Domain models, ARM client, cache, basic TUI
 - [x] Phase 2: Key Vault secrets, TUI navigation, shell integration, tests
 - [x] Phase 3: Initialize Example vault with random secrets, export as env vars
+- [x] Phase 3b: In-app button to add 3 random demo secrets to any existing vault
 - [ ] Phase 4: Microsoft Graph enrichment (tenant display names), multi-select secrets, search/filter
 - [ ] Phase 5: Cross-platform release binaries (goreleaser), Homebrew tap

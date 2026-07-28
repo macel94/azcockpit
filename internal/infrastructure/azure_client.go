@@ -51,6 +51,10 @@ type AzureClient interface {
 	// secrets in the given vault and returns them as a name→value map.
 	ExportKeyVaultSecrets(ctx context.Context, vaultURI string) (map[string]string, error)
 
+	// PopulateRandomSecrets creates 3 random demo secrets in an existing
+	// Key Vault and returns the created secrets.
+	PopulateRandomSecrets(ctx context.Context, vaultURI, vaultName, subscriptionID string) ([]domain.KeyVaultSecret, error)
+
 	// GetCredential returns the underlying credential for shared use.
 	GetCredential() azcore.TokenCredential
 }
@@ -250,6 +254,52 @@ func (c *azureClient) ExportKeyVaultSecrets(ctx context.Context, vaultURI string
 	}
 
 	return values, nil
+}
+
+// PopulateRandomSecrets creates 3 random demo secrets in an existing vault
+// using the Azure CLI (`az keyvault secret set`). Returns the created secrets
+// with their names and enabled state.
+func (c *azureClient) PopulateRandomSecrets(ctx context.Context, vaultURI, vaultName, subscriptionID string) ([]domain.KeyVaultSecret, error) {
+	azPath, err := exec.LookPath("az")
+	if err != nil {
+		return nil, fmt.Errorf("azure CLI (az) not found in PATH: %w", err)
+	}
+
+	// Use the same secret definitions as InitializeExample.
+	type secretDef struct {
+		name  string
+		value string
+	}
+	secretDefs := []secretDef{
+		{name: "DEMO_DB_PASSWORD", value: randomAlphaNumeric(16)},
+		{name: "DEMO_API_KEY", value: randomHex(16)},
+		{name: "DEMO_STORAGE_CONNECTION_STRING", value: "DefaultEndpointsProtocol=https;AccountName=demo;AccountKey=" + randomHex(16)},
+	}
+
+	var secrets []domain.KeyVaultSecret
+	for _, sd := range secretDefs {
+		secretCmd := exec.CommandContext(ctx, azPath, "keyvault", "secret", "set",
+			"--vault-name", vaultName,
+			"--subscription", subscriptionID,
+			"--name", sd.name,
+			"--value", sd.value,
+		)
+		_, err := secretCmd.CombinedOutput()
+		if err != nil {
+			// Log warning but continue — best-effort secret creation.
+			continue
+		}
+		secrets = append(secrets, domain.KeyVaultSecret{
+			Name:    sd.name,
+			Enabled: true,
+		})
+	}
+
+	if len(secrets) == 0 {
+		return nil, fmt.Errorf("failed to create any secrets in vault %s", vaultName)
+	}
+
+	return secrets, nil
 }
 
 // getSecretsClient returns a cached or newly created data-plane secrets client.
