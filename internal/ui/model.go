@@ -15,7 +15,10 @@ import (
 )
 
 // loadingTimeout is how long we wait before giving up on Azure API calls.
-const loadingTimeout = 30 * time.Second
+// First-time initialization (auth + listing tenants/subscriptions) can
+// take well over 30 seconds depending on the number of tenants and the
+// DefaultAzureCredential chain.
+const loadingTimeout = 120 * time.Second
 
 // --- View State ---
 
