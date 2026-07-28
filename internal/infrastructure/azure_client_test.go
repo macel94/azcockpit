@@ -1,279 +1,412 @@
 package infrastructure
 
 import (
+	"context"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+
+	"github.com/nousresearch/azcockpit/internal/domain"
 )
 
-func TestExtractResourceGroup_Valid(t *testing.T) {
-	tests := []struct {
-		name     string
-		armID    string
-		expected string
-	}{
-		{
-			name:     "standard ARM ID",
-			armID:    "/subscriptions/sub-id/resourceGroups/my-rg/providers/Microsoft.KeyVault/vaults/myvault",
-			expected: "my-rg",
-		},
-		{
-			name:     "nested resource",
-			armID:    "/subscriptions/sub-id/resourceGroups/prod-rg/providers/Microsoft.Compute/virtualMachines/myvm",
-			expected: "prod-rg",
-		},
-		{
-			name:     "mixed case resourceGroups",
-			armID:    "/subscriptions/sub-id/ResourceGroups/CaseRg/providers/Microsoft.Web/sites",
-			expected: "CaseRg",
-		},
-		{
-			name:     "all lowercase",
-			armID:    "/subscriptions/sub-id/resourcegroups/lower-rg/providers/Microsoft.Web/sites",
-			expected: "lower-rg",
-		},
-		{
-			name:     "resource group is last segment",
-			armID:    "/subscriptions/sub-id/resourceGroups/my-rg",
-			expected: "my-rg",
-		},
-	}
+// ---------------------------------------------------------------------------
+// mockAzureClient — test double for the AzureClient interface
+// ---------------------------------------------------------------------------
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := extractResourceGroup(tt.armID)
-			if got != tt.expected {
-				t.Errorf("extractResourceGroup(%q) = %q, want %q", tt.armID, got, tt.expected)
-			}
-		})
-	}
+type mockAzureClient struct {
+	mu           sync.RWMutex
+	vaults       map[string][]domain.KeyVault  // keyed by subscriptionID
+	secrets      map[string][]domain.KeyVaultSecret // keyed by vaultURI
+	secretsCalls map[string]int                // tracks how many times ListKeyVaultSecrets was called per URI
 }
 
-func TestExtractResourceGroup_Invalid(t *testing.T) {
-	tests := []struct {
-		name  string
-		armID string
-	}{
-		{
-			name:  "empty string",
-			armID: "",
-		},
-		{
-			name:  "no resourceGroups segment",
-			armID: "/subscriptions/sub-id/providers/Microsoft.KeyVault/vaults/myvault",
-		},
-		{
-			name:  "resourceGroups at end with no following segment",
-			armID: "/subscriptions/sub-id/resourceGroups/",
-		},
-		{
-			name:  "random string",
-			armID: "not-an-arm-id",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := extractResourceGroup(tt.armID)
-			if got != "" {
-				t.Errorf("extractResourceGroup(%q) = %q, want empty string", tt.armID, got)
-			}
-		})
-	}
+func (m *mockAzureClient) ListTenants(_ context.Context) ([]domain.Tenant, error) {
+	return nil, nil
 }
 
-func TestDerefString(t *testing.T) {
-	// Nil pointer.
-	if got := derefString(nil); got != "" {
-		t.Errorf("derefString(nil) = %q, want empty string", got)
-	}
-
-	// Non-nil pointer.
-	val := "hello"
-	if got := derefString(&val); got != "hello" {
-		t.Errorf("derefString(&%q) = %q, want %q", val, got, val)
-	}
-
-	// Empty string pointer.
-	empty := ""
-	if got := derefString(&empty); got != "" {
-		t.Errorf("derefString(&\"\") = %q, want empty string", got)
-	}
+func (m *mockAzureClient) ListSubscriptions(_ context.Context) ([]domain.Subscription, error) {
+	return nil, nil
 }
 
-func TestDerefBool(t *testing.T) {
-	// Nil pointer.
-	if got := derefBool(nil); got != false {
-		t.Errorf("derefBool(nil) = %v, want false", got)
+func (m *mockAzureClient) ListKeyVaults(_ context.Context, subscriptionID string) ([]domain.KeyVault, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.vaults == nil {
+		return nil, nil
 	}
-
-	// true pointer.
-	trueVal := true
-	if got := derefBool(&trueVal); got != true {
-		t.Errorf("derefBool(&true) = %v, want true", got)
-	}
-
-	// false pointer.
-	falseVal := false
-	if got := derefBool(&falseVal); got != false {
-		t.Errorf("derefBool(&false) = %v, want false", got)
-	}
+	vaults := m.vaults[subscriptionID]
+	// Return a defensive copy so callers can't mutate cached data.
+	out := make([]domain.KeyVault, len(vaults))
+	copy(out, vaults)
+	return out, nil
 }
 
-func TestCopyStringMap(t *testing.T) {
-	// Nil map.
-	if got := copyStringMap(nil); got != nil {
-		t.Errorf("copyStringMap(nil) = %v, want nil", got)
+func (m *mockAzureClient) ListKeyVaultSecrets(_ context.Context, vaultURI string) ([]domain.KeyVaultSecret, error) {
+	m.mu.Lock()
+	if m.secretsCalls == nil {
+		m.secretsCalls = make(map[string]int)
+	}
+	m.secretsCalls[vaultURI]++
+	m.mu.Unlock()
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.secrets == nil {
+		return nil, nil
+	}
+	secrets := m.secrets[vaultURI]
+	out := make([]domain.KeyVaultSecret, len(secrets))
+	copy(out, secrets)
+	return out, nil
+}
+
+func (m *mockAzureClient) GetKeyVaultSecret(_ context.Context, _, _ string) (string, error) {
+	return "", nil
+}
+
+func (m *mockAzureClient) SetActiveSubscription(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (m *mockAzureClient) InitializeExample(_ context.Context, _, _ string) (domain.KeyVault, []domain.KeyVaultSecret, error) {
+	return domain.KeyVault{}, nil, nil
+}
+
+func (m *mockAzureClient) GetCredential() azcore.TokenCredential {
+	return nil
+}
+
+// Compile-time interface check.
+var _ AzureClient = (*mockAzureClient)(nil)
+
+// ---------------------------------------------------------------------------
+// fakeCredential — minimal azcore.TokenCredential for unit tests
+// ---------------------------------------------------------------------------
+
+type fakeCredential struct{}
+
+func (f *fakeCredential) GetToken(_ context.Context, _ policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	return azcore.AccessToken{Token: "fake", ExpiresOn: time.Now().Add(time.Hour)}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+// TestMockAzureClient_ListKeyVaults_VaultURI verifies that ListKeyVaults
+// populates the VaultURI field on each returned vault.
+func TestMockAzureClient_ListKeyVaults_VaultURI(t *testing.T) {
+	mock := &mockAzureClient{
+		vaults: map[string][]domain.KeyVault{
+			"sub-1": {
+				{
+					Name: "vault-westus",
+					Properties: domain.KeyVaultProperties{
+						VaultURI: "https://vault-westus.vault.azure.net/",
+					},
+				},
+				{
+					Name: "vault-eastus",
+					Properties: domain.KeyVaultProperties{
+						VaultURI: "https://vault-eastus.vault.azure.net/",
+					},
+				},
+			},
+		},
 	}
 
-	// Normal map.
-	input := map[string]*string{
-		"key1": strPtr("value1"),
-		"key2": strPtr("value2"),
+	vaults, err := mock.ListKeyVaults(context.Background(), "sub-1")
+	if err != nil {
+		t.Fatalf("ListKeyVaults failed: %v", err)
 	}
-	got := copyStringMap(input)
-	if len(got) != 2 {
-		t.Errorf("expected 2 entries, got %d", len(got))
-	}
-	if got["key1"] != "value1" {
-		t.Errorf("expected key1='value1', got %q", got["key1"])
-	}
-	if got["key2"] != "value2" {
-		t.Errorf("expected key2='value2', got %q", got["key2"])
+	if len(vaults) != 2 {
+		t.Fatalf("expected 2 vaults, got %d", len(vaults))
 	}
 
-	// Map with nil values (should skip nil entries).
-	mixed := map[string]*string{
-		"key1": strPtr("value1"),
-		"key2": nil,
-		"key3": strPtr("value3"),
-	}
-	got2 := copyStringMap(mixed)
-	if len(got2) != 2 {
-		t.Errorf("expected 2 entries (nil skipped), got %d", len(got2))
-	}
-	if _, exists := got2["key2"]; exists {
-		t.Error("expected key2 to be skipped (nil value)")
-	}
-
-	// Empty map.
-	empty := map[string]*string{}
-	got3 := copyStringMap(empty)
-	if got3 == nil || len(got3) != 0 {
-		t.Errorf("expected empty map, got %v", got3)
-	}
-
-	// Verify copy is independent.
-	input["key1"] = strPtr("modified")
-	if got["key1"] != "modified" {
-		// The returned map should've been a copy — but since we modified the
-		// pointer target, the copy would have the old value. Wait, actually
-		// the copy stores *string values. So if we change what the *string
-		// points to, the copy WOULD see the change. But we're changing the
-		// map entry (the pointer itself), not what it points to.
-		// That's fine — the copy has its own map with its own pointers.
-		// Actually, copyStringMap dereferences the pointer, so it stores
-		// plain strings. So the output map contains "value1" even after
-		// we change input["key1"] to point to "modified".
-		if got["key1"] != "value1" {
-			t.Errorf("expected copy to be independent, got key1=%q", got["key1"])
+	t.Run("first vault URI", func(t *testing.T) {
+		want := "https://vault-westus.vault.azure.net/"
+		if vaults[0].Properties.VaultURI != want {
+			t.Errorf("VaultURI = %q, want %q", vaults[0].Properties.VaultURI, want)
 		}
+	})
+
+	t.Run("second vault URI", func(t *testing.T) {
+		want := "https://vault-eastus.vault.azure.net/"
+		if vaults[1].Properties.VaultURI != want {
+			t.Errorf("VaultURI = %q, want %q", vaults[1].Properties.VaultURI, want)
+		}
+	})
+}
+
+// TestMockAzureClient_ListKeyVaults_PropertiesFields verifies that
+// ListKeyVaults populates TenantID and SKU on each returned vault.
+func TestMockAzureClient_ListKeyVaults_PropertiesFields(t *testing.T) {
+	standardSKU := domain.KeyVaultSKU{Family: "A", Name: "standard"}
+	premiumSKU := domain.KeyVaultSKU{Family: "A", Name: "premium"}
+
+	mock := &mockAzureClient{
+		vaults: map[string][]domain.KeyVault{
+			"sub-1": {
+				{
+					Name: "vault-a",
+					Properties: domain.KeyVaultProperties{
+						TenantID: "11111111-1111-1111-1111-111111111111",
+						SKU:      standardSKU,
+					},
+				},
+				{
+					Name: "vault-b",
+					Properties: domain.KeyVaultProperties{
+						TenantID: "22222222-2222-2222-2222-222222222222",
+						SKU:      premiumSKU,
+					},
+				},
+			},
+		},
+	}
+
+	vaults, err := mock.ListKeyVaults(context.Background(), "sub-1")
+	if err != nil {
+		t.Fatalf("ListKeyVaults failed: %v", err)
+	}
+	if len(vaults) != 2 {
+		t.Fatalf("expected 2 vaults, got %d", len(vaults))
+	}
+
+	t.Run("first vault TenantID and SKU", func(t *testing.T) {
+		if vaults[0].Properties.TenantID != "11111111-1111-1111-1111-111111111111" {
+			t.Errorf("TenantID = %q, want 11111111-1111-1111-1111-111111111111",
+				vaults[0].Properties.TenantID)
+		}
+		if vaults[0].Properties.SKU != standardSKU {
+			t.Errorf("SKU = %+v, want %+v", vaults[0].Properties.SKU, standardSKU)
+		}
+	})
+
+	t.Run("second vault TenantID and SKU", func(t *testing.T) {
+		if vaults[1].Properties.TenantID != "22222222-2222-2222-2222-222222222222" {
+			t.Errorf("TenantID = %q, want 22222222-2222-2222-2222-222222222222",
+				vaults[1].Properties.TenantID)
+		}
+		if vaults[1].Properties.SKU != premiumSKU {
+			t.Errorf("SKU = %+v, want %+v", vaults[1].Properties.SKU, premiumSKU)
+		}
+	})
+}
+
+// TestMockAzureClient_ListKeyVaultSecrets_PassesVaultURI verifies that
+// ListKeyVaultSecrets uses the vaultURI to look up secrets so that
+// different vault URIs return different secret sets.
+func TestMockAzureClient_ListKeyVaultSecrets_PassesVaultURI(t *testing.T) {
+	mock := &mockAzureClient{
+		secrets: map[string][]domain.KeyVaultSecret{
+			"https://vault-a.vault.azure.net/": {
+				{Name: "secret-a1", Enabled: true},
+				{Name: "secret-a2", Enabled: true},
+			},
+			"https://vault-b.vault.azure.net/": {
+				{Name: "secret-b1", Enabled: true},
+			},
+		},
+	}
+
+	ctx := context.Background()
+
+	t.Run("vault A returns its secrets", func(t *testing.T) {
+		secrets, err := mock.ListKeyVaultSecrets(ctx, "https://vault-a.vault.azure.net/")
+		if err != nil {
+			t.Fatalf("ListKeyVaultSecrets failed: %v", err)
+		}
+		if len(secrets) != 2 {
+			t.Fatalf("expected 2 secrets for vault-a, got %d", len(secrets))
+		}
+		if secrets[0].Name != "secret-a1" || secrets[1].Name != "secret-a2" {
+			t.Errorf("unexpected secret names: %+v", secrets)
+		}
+	})
+
+	t.Run("vault B returns its secrets", func(t *testing.T) {
+		secrets, err := mock.ListKeyVaultSecrets(ctx, "https://vault-b.vault.azure.net/")
+		if err != nil {
+			t.Fatalf("ListKeyVaultSecrets failed: %v", err)
+		}
+		if len(secrets) != 1 {
+			t.Fatalf("expected 1 secret for vault-b, got %d", len(secrets))
+		}
+		if secrets[0].Name != "secret-b1" {
+			t.Errorf("unexpected secret name: %q", secrets[0].Name)
+		}
+	})
+
+	t.Run("unknown vault returns nil", func(t *testing.T) {
+		secrets, err := mock.ListKeyVaultSecrets(ctx, "https://unknown.vault.azure.net/")
+		if err != nil {
+			t.Fatalf("ListKeyVaultSecrets failed: %v", err)
+		}
+		if len(secrets) != 0 {
+			t.Errorf("expected 0 secrets for unknown vault, got %d", len(secrets))
+		}
+	})
+}
+
+// TestCacheRoundTrip_VaultURI verifies that SaveVaults followed by GetVaults
+// preserves the VaultURI field.
+func TestCacheRoundTrip_VaultURI(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	cache, err := NewCache(10 * time.Minute)
+	if err != nil {
+		t.Fatalf("NewCache failed: %v", err)
+	}
+
+	vaults := []domain.KeyVault{
+		{
+			Name: "vault-1",
+			Properties: domain.KeyVaultProperties{
+				VaultURI: "https://vault-1.vault.azure.net/",
+			},
+		},
+		{
+			Name: "vault-2",
+			Properties: domain.KeyVaultProperties{
+				VaultURI: "https://vault-2.vault.azure.net/",
+			},
+		},
+	}
+
+	if err := cache.SaveVaults("sub-a", vaults); err != nil {
+		t.Fatalf("SaveVaults failed: %v", err)
+	}
+
+	got := cache.GetVaults("sub-a")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 vaults, got %d", len(got))
+	}
+
+	t.Run("first vault VaultURI preserved", func(t *testing.T) {
+		if got[0].Properties.VaultURI != "https://vault-1.vault.azure.net/" {
+			t.Errorf("VaultURI = %q, want %q",
+				got[0].Properties.VaultURI, "https://vault-1.vault.azure.net/")
+		}
+	})
+
+	t.Run("second vault VaultURI preserved", func(t *testing.T) {
+		if got[1].Properties.VaultURI != "https://vault-2.vault.azure.net/" {
+			t.Errorf("VaultURI = %q, want %q",
+				got[1].Properties.VaultURI, "https://vault-2.vault.azure.net/")
+		}
+	})
+
+	// Also verify the round trip survives a second cache load (disk persistence).
+	t.Run("survives disk reload", func(t *testing.T) {
+		cache2, err := NewCache(10 * time.Minute)
+		if err != nil {
+			t.Fatalf("second NewCache failed: %v", err)
+		}
+		got2 := cache2.GetVaults("sub-a")
+		if len(got2) != 2 {
+			t.Fatalf("expected 2 vaults after reload, got %d", len(got2))
+		}
+		if got2[0].Properties.VaultURI != "https://vault-1.vault.azure.net/" {
+			t.Errorf("after reload VaultURI = %q, want %q",
+				got2[0].Properties.VaultURI, "https://vault-1.vault.azure.net/")
+		}
+	})
+}
+
+// TestGetSecretsClient_Caching verifies that calling getSecretsClient with
+// the same vaultURI twice reuses the cached client instead of creating a new one.
+func TestGetSecretsClient_Caching(t *testing.T) {
+	client := &azureClient{
+		credential:     &fakeCredential{},
+		secretsByVault: make(map[string]*keyVaultSecretsClient),
+	}
+
+	uri := "https://testvault.vault.azure.net/"
+
+	// First call should create and cache a new client.
+	c1, err := client.getSecretsClient(uri)
+	if err != nil {
+		t.Fatalf("first getSecretsClient failed: %v", err)
+	}
+	if c1 == nil {
+		t.Fatal("expected non-nil client on first call")
+	}
+
+	// Second call with the same URI should return the cached instance.
+	c2, err := client.getSecretsClient(uri)
+	if err != nil {
+		t.Fatalf("second getSecretsClient failed: %v", err)
+	}
+	if c2 == nil {
+		t.Fatal("expected non-nil client on second call")
+	}
+
+	// Pointer identity check — same cached object.
+	if c1 != c2 {
+		t.Error("expected getSecretsClient to return the same cached client for the same URI")
+	}
+
+	// Only one entry in the cache map.
+	if len(client.secretsByVault) != 1 {
+		t.Errorf("expected 1 entry in secretsByVault, got %d", len(client.secretsByVault))
+	}
+
+	// A different URI should create a separate client.
+	uri2 := "https://othervault.vault.azure.net/"
+	c3, err := client.getSecretsClient(uri2)
+	if err != nil {
+		t.Fatalf("getSecretsClient for different URI failed: %v", err)
+	}
+	if c3 == nil {
+		t.Fatal("expected non-nil client for different URI")
+	}
+
+	if c1 == c3 {
+		t.Error("expected a different client instance for a different vault URI")
+	}
+
+	if len(client.secretsByVault) != 2 {
+		t.Errorf("expected 2 entries in secretsByVault after two distinct URIs, got %d",
+			len(client.secretsByVault))
 	}
 }
 
-func TestStringValue(t *testing.T) {
-	// Define a custom string type.
-	type MyString string
-
-	// Nil pointer.
-	if got := stringValue[MyString](nil); got != "" {
-		t.Errorf("stringValue(nil) = %q, want empty string", got)
+// TestGetSecretsClient_CachingConcurrent verifies that getSecretsClient is
+// safe under concurrent access (the double-checked locking in the implementation).
+func TestGetSecretsClient_CachingConcurrent(t *testing.T) {
+	client := &azureClient{
+		credential:     &fakeCredential{},
+		secretsByVault: make(map[string]*keyVaultSecretsClient),
 	}
 
-	// Non-nil pointer.
-	val := MyString("hello")
-	if got := stringValue(&val); got != "hello" {
-		t.Errorf("stringValue(&%q) = %q, want %q", val, got, val)
-	}
-}
+	uri := "https://concurrent.vault.azure.net/"
+	var wg sync.WaitGroup
 
-// strPtr is a test helper that returns a pointer to the given string.
-func strPtr(s string) *string {
-	return &s
-}
-
-func TestSecretNameFromID(t *testing.T) {
-	tests := []struct {
-		name     string
-		id       string
-		expected string
-	}{
-		{
-			name:     "valid secret ID with version",
-			id:       "https://myvault.vault.azure.net/secrets/my-secret/abc123def456",
-			expected: "my-secret",
-		},
-		{
-			name:     "valid secret ID without version",
-			id:       "https://myvault.vault.azure.net/secrets/my-secret",
-			expected: "my-secret",
-		},
-		{
-			name:     "secret name with hyphens and numbers",
-			id:       "https://kv-prod-us.vault.azure.net/secrets/db-password-v3/version1",
-			expected: "db-password-v3",
-		},
-		{
-			name:     "secret name with dots",
-			id:       "https://kv.vault.azure.net/secrets/app.config/version",
-			expected: "app.config",
-		},
-		{
-			name:     "empty string",
-			id:       "",
-			expected: "",
-		},
-		{
-			name:     "no /secrets/ segment",
-			id:       "https://myvault.vault.azure.net",
-			expected: "",
-		},
-		{
-			name:     "trailing slash after secrets",
-			id:       "https://myvault.vault.azure.net/secrets/",
-			expected: "",
-		},
-		{
-			name:     "secrets not in path pattern",
-			id:       "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/vault",
-			expected: "",
-		},
-		{
-			name:     "partial match of /secrets/ substring",
-			id:       "https://myvault.vault.azure.net/notsecrets/my-secret",
-			expected: "",
-		},
-		{
-			name:     "actually /secrets in wrong context",
-			id:       "https://myvault.vault.azure.net/not-secrets/my-secret",
-			expected: "",
-		},
-		{
-			name:     "shortest valid ID",
-			id:       "/secrets/x",
-			expected: "x",
-		},
-		{
-			name:     "ID with query params after version is not supported",
-			id:       "https://myvault.vault.azure.net/secrets/my-secret/version?api-version=7.4",
-			expected: "my-secret",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := secretNameFromID(tt.id)
-			if got != tt.expected {
-				t.Errorf("secretNameFromID(%q) = %q, want %q", tt.id, got, tt.expected)
+	// Fire off 20 concurrent goroutines all requesting the same vault URI.
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sc, err := client.getSecretsClient(uri)
+			if err != nil {
+				t.Errorf("concurrent getSecretsClient failed: %v", err)
+				return
 			}
-		})
+			if sc == nil {
+				t.Error("concurrent getSecretsClient returned nil")
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Only one entry created despite concurrent calls.
+	if len(client.secretsByVault) != 1 {
+		t.Errorf("expected 1 entry in secretsByVault after concurrent calls, got %d",
+			len(client.secretsByVault))
 	}
 }

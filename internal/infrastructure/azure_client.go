@@ -155,7 +155,7 @@ func (c *azureClient) ListSubscriptions(ctx context.Context) ([]domain.Subscript
 	return subscriptions, nil
 }
 
-// ListKeyVaults returns all Key Vaults in the given subscription.
+// ListKeyVaults returns all Key Vaults in the given subscription with full properties.
 func (c *azureClient) ListKeyVaults(ctx context.Context, subscriptionID string) ([]domain.KeyVault, error) {
 	client, err := armkeyvault.NewVaultsClient(subscriptionID, c.credential, nil)
 	if err != nil {
@@ -164,7 +164,7 @@ func (c *azureClient) ListKeyVaults(ctx context.Context, subscriptionID string) 
 
 	var vaults []domain.KeyVault
 
-	pager := client.NewListPager(nil)
+	pager := client.NewListBySubscriptionPager(nil)
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
@@ -186,6 +186,20 @@ func (c *azureClient) ListKeyVaults(ctx context.Context, subscriptionID string) 
 
 			if rg := extractResourceGroup(kv.ID); rg != "" {
 				kv.ResourceGroup = rg
+			}
+
+			if v.Properties != nil {
+				kv.Properties.VaultURI = derefString(v.Properties.VaultURI)
+				kv.Properties.TenantID = derefString(v.Properties.TenantID)
+				kv.Properties.EnableSoftDelete = derefBool(v.Properties.EnableSoftDelete)
+				kv.Properties.EnablePurgeProtection = derefBool(v.Properties.EnablePurgeProtection)
+				kv.Properties.EnableRBACAuthorization = derefBool(v.Properties.EnableRbacAuthorization)
+				if v.Properties.SKU != nil {
+					kv.Properties.SKU = domain.KeyVaultSKU{
+						Family: stringValue(v.Properties.SKU.Family),
+						Name:   stringValue(v.Properties.SKU.Name),
+					}
+				}
 			}
 
 			vaults = append(vaults, kv)
